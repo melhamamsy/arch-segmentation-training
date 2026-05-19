@@ -1,0 +1,16 @@
+# TODO: U-Net baseline experiment config
+model:
+  backbone: resnet50
+  num_room_classes: null
+  wall_threshold: 0.5
+
+training:
+  epochs: 50
+  batch_size: 8
+  lr: 0.0001
+  loss_weight_wall: 1.0
+  loss_weight_rooms: 1.0
+
+data:
+  image_size: 512
+  dataset_version: v1_original

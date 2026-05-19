@@ -1,0 +1,39 @@
+# Core deep learning
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Intel XPU support (optional — required only for --device xpu)
+# Install separately; version must match your torch version:
+#   pip install intel-extension-for-pytorch
+# intel-extension-for-pytorch
+
+# HuggingFace ecosystem
+transformers>=4.40.0
+datasets>=2.19.0
+huggingface-hub>=0.23.0
+
+# Experiment tracking
+mlflow>=2.13.0
+
+# Image processing & augmentation
+Pillow>=10.3.0
+opencv-python-headless>=4.9.0
+albumentations>=1.4.0
+
+# Data / numeric
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+
+# Visualization
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# Segmentation models
+segmentation-models-pytorch>=0.3.3
+
+# Utilities
+tqdm>=4.66.0
+pyyaml>=6.0.0
+einops>=0.7.0
+timm>=0.9.0

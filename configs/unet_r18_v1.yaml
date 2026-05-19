@@ -1,0 +1,52 @@
+# ── Experiment ──────────────────────────────────────────────────────────────
+experiment_name: unet_r18_v1          # MLflow experiment name
+dataset_version: v1                   # must match a file in data/versions/
+
+# ── Model ───────────────────────────────────────────────────────────────────
+model:
+  encoder:          resnet18
+  encoder_weights:  imagenet
+  decoder_channels: [256, 128, 64, 32, 16]
+
+# ── Training ────────────────────────────────────────────────────────────────
+training:
+  epochs:      30
+  batch_size:  8
+  image_size:  512
+  num_workers: 0           # 0 = safe on Windows; increase on Linux/Kaggle
+
+  # Optimizer (AdamW)
+  lr:           1.0e-4
+  weight_decay: 1.0e-5
+
+  # Differential LR: encoder gets 10x lower LR than decoders
+  encoder_lr_scale: 0.1   # encoder_lr = lr * encoder_lr_scale
+
+  # Loss weights  L = alpha*L_wall + beta*L_room
+  loss_wall_weight: 1.0
+  loss_room_weight: 1.0
+
+  # Wall loss composition  (BCE + Dice)
+  wall_bce_weight:  0.5
+  wall_dice_weight: 0.5
+
+  # Up-weight wall pixels to fight class imbalance
+  # Rule of thumb: ~(1 - wall_density) / wall_density
+  # Set null to disable
+  wall_pos_weight: 9.0    # assumes ~10% wall pixels
+
+# ── LR scheduler ────────────────────────────────────────────────────────────
+scheduler:
+  name: cosine             # cosine | step | none
+  # CosineAnnealingLR params
+  T_max: 30                # should match training.epochs
+
+# ── Evaluation ──────────────────────────────────────────────────────────────
+evaluation:
+  best_metric:         val_room_miou   # metric used to save best checkpoint
+  wall_pred_threshold: 0.5             # sigmoid threshold for wall prediction
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  checkpoint_dir: checkpoints/unet_r18_v1
+  palette_dir:    data/versions        # where <version>_palette.json is saved

@@ -1,0 +1,11 @@
+# Ignore virtual environments
+.venv/
+
+# Ignore all data contents
+**/data/**
+!**/data/**/
+!**/data/**/.gitkeep
+
+experiments/
+!experiments/.gitkeep
+mlruns

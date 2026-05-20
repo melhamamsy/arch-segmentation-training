@@ -174,13 +174,13 @@ def save_dataset(
             for col in MASK_COLS:
                 m_path = out_dir / "masks" / col / fname
                 _to_rgb(sample[col]).save(m_path)
-                mask_paths[col] = str(m_path.relative_to(ROOT))
+                mask_paths[col] = m_path.relative_to(ROOT).as_posix()
 
             manifest.append({
                 "filename": fname,
                 "source": name,
                 "original_index": sample["indices"],
-                "image_path": str(img_path.relative_to(ROOT)),
+                "image_path": img_path.relative_to(ROOT).as_posix(),
                 "masks": mask_paths,
             })
             metadata.append({
@@ -209,12 +209,12 @@ def _rebuild_manifest(out_dir: Path, prefix: str, source_name: str) -> list[dict
     manifest = []
     for img_path in sorted(images_dir.glob(f"{prefix}_*.png")):
         fname = img_path.name
-        masks = {col: str((out_dir / "masks" / col / fname).relative_to(ROOT))
+        masks = {col: (out_dir / "masks" / col / fname).relative_to(ROOT).as_posix()
                  for col in MASK_COLS}
         manifest.append({
             "filename": fname,
             "source": source_name,
-            "image_path": str(img_path.relative_to(ROOT)),
+            "image_path": img_path.relative_to(ROOT).as_posix(),
             "masks": masks,
         })
     return manifest

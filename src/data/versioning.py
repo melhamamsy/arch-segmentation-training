@@ -137,12 +137,12 @@ def _collect_samples(source_name: str) -> list[dict]:
         for col in MASK_COLS:
             m = src_dir / "masks" / col / fname
             if m.exists():
-                masks[col] = str(m.relative_to(ROOT))
+                masks[col] = m.relative_to(ROOT).as_posix()
         samples.append({
             "filename": fname,
             "source": source_name,
             "augmentation": augmentation,
-            "image_path": str(img_path.relative_to(ROOT)),
+            "image_path": img_path.relative_to(ROOT).as_posix(),
             "masks": masks,
         })
 
@@ -193,7 +193,7 @@ def _source_meta(source_name: str, n_samples: int) -> dict:
     src_dir = RAW_DIR / source_name
     augmentation = _get_augmentation(source_name)
     return {
-        "local_dir": str(src_dir.relative_to(ROOT)),
+        "local_dir": src_dir.relative_to(ROOT).as_posix(),
         "augmentation": augmentation,
         "total_samples": n_samples,
     }

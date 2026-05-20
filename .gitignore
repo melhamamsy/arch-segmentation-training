@@ -5,6 +5,7 @@
 **/data/**
 !**/data/**/
 !**/data/**/.gitkeep
+!src/data/*
 
 experiments/
 !experiments/.gitkeep

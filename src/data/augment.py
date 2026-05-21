@@ -30,7 +30,9 @@ Usage:
 """
 
 import argparse
+import os
 import sys
+from multiprocessing import Pool
 from pathlib import Path
 from typing import Callable
 
@@ -229,6 +231,42 @@ def apply_pipeline(
 
 
 # ---------------------------------------------------------------------------
+# Worker (must be module-level for multiprocessing pickling)
+# ---------------------------------------------------------------------------
+
+def _process_one(args: tuple) -> int:
+    """Process a single image. Returns 1 if written, 0 if skipped or failed."""
+    img_path, src_dir, strategies, out_dir, combined, force = args
+
+    out_name = f"{combined}_{img_path.name}"
+    img_out  = out_dir / "images" / out_name
+
+    if not force and img_out.exists():
+        return 0
+
+    try:
+        img_np = np.array(Image.open(img_path).convert("RGB"))
+        masks: list[np.ndarray] = []
+        for col in MASK_COLS:
+            m_path = src_dir / "masks" / col / img_path.name
+            masks.append(
+                np.array(Image.open(m_path).convert("RGB"))
+                if m_path.exists() else np.zeros_like(img_np)
+            )
+
+        out_img_np, out_masks = apply_pipeline(strategies, img_np, masks)
+
+        Image.fromarray(out_img_np).save(img_out)
+        for col, mask_np in zip(MASK_COLS, out_masks):
+            Image.fromarray(mask_np).save(out_dir / "masks" / col / out_name)
+
+        return 1
+    except Exception as exc:
+        print(f"\nWARN  {img_path.name}: {exc}", flush=True)
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Per-source processing
 # ---------------------------------------------------------------------------
 
@@ -239,7 +277,12 @@ def _detect_prefix(images_dir: Path) -> str:
     raise ValueError(f"Cannot detect prefix in {images_dir}")
 
 
-def augment_source(source: str, strategies: list[str], force: bool = False) -> int:
+def augment_source(
+    source: str,
+    strategies: list[str],
+    force: bool = False,
+    workers: int | None = None,
+) -> int:
     src_dir    = RAW_DIR / source
     images_dir = src_dir / "images"
     if not images_dir.exists():
@@ -258,34 +301,26 @@ def augment_source(source: str, strategies: list[str], force: bool = False) -> i
         print(f"No images found in {images_dir}")
         return 0
 
+    n_workers = workers or os.cpu_count() or 1
     print(f"\nSource   : {source}  ({len(image_paths)} images)")
     print(f"Pipeline : {' -> '.join(strategies)}")
+    print(f"Workers  : {n_workers}")
     print(f"Output   : {out_dir.relative_to(ROOT)}")
 
+    tasks = [
+        (img_path, src_dir, strategies, out_dir, combined, force)
+        for img_path in image_paths
+    ]
+
     written = 0
-    for img_path in tqdm(image_paths, desc=f"{combined}/{source}", unit="img"):
-        out_name = f"{combined}_{img_path.name}"
-        img_out  = out_dir / "images" / out_name
-
-        if not force and img_out.exists():
-            continue
-
-        img_np = np.array(Image.open(img_path).convert("RGB"))
-        masks: list[np.ndarray] = []
-        for col in MASK_COLS:
-            m_path = src_dir / "masks" / col / img_path.name
-            masks.append(
-                np.array(Image.open(m_path).convert("RGB"))
-                if m_path.exists() else np.zeros_like(img_np)
-            )
-
-        out_img_np, out_masks = apply_pipeline(strategies, img_np, masks)
-
-        Image.fromarray(out_img_np).save(img_out)
-        for col, mask_np in zip(MASK_COLS, out_masks):
-            Image.fromarray(mask_np).save(out_dir / "masks" / col / out_name)
-
-        written += 1
+    with Pool(n_workers) as pool:
+        for result in tqdm(
+            pool.imap_unordered(_process_one, tasks),
+            total=len(tasks),
+            desc=f"{combined}/{source}",
+            unit="img",
+        ):
+            written += result
 
     skipped = len(image_paths) - written
     if skipped:
@@ -314,6 +349,9 @@ def main() -> None:
         "--force", action="store_true",
         help="Overwrite existing output files.")
     parser.add_argument(
+        "--workers", type=int, default=None,
+        help="Number of parallel worker processes (default: all CPU cores).")
+    parser.add_argument(
         "--list-strategies", action="store_true",
         help="Print available strategies and exit.")
 
@@ -332,7 +370,8 @@ def main() -> None:
     targets = [args.source] if args.source else SOURCES
     total = 0
     for source in targets:
-        total += augment_source(source, args.strategies, force=args.force)
+        total += augment_source(source, args.strategies,
+                                force=args.force, workers=args.workers)
 
     print(f"\nTotal written: {total}")
     print("Done.")

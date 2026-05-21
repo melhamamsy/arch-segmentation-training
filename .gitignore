@@ -10,5 +10,6 @@
 !data/external/images/*
 
 experiments/
+trials/
 !experiments/.gitkeep
 mlruns

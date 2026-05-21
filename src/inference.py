@@ -39,7 +39,9 @@ Usage:
 """
 
 import argparse
+import cv2
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -49,6 +51,7 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms as T
 from tqdm import tqdm
+from PIL import Image, ImageEnhance
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -65,13 +68,55 @@ _IMAGENET_STD  = [0.229, 0.224, 0.225]
 # Color enhancement  (placeholder)
 # ---------------------------------------------------------------------------
 
-def enhance_colors(img: Image.Image) -> Image.Image:
+def enhance_colors(pil_image: Image.Image, save_path=None) -> Image.Image:
     """
-    Pre-inference color enhancement hook.
-    Currently a no-op — add logic here as needed
-    (e.g. CLAHE, contrast normalisation, denoising).
+    Enhance the quality of a PIL image to improve OCR/OD detection.
+
+    Parameters
+    ----------
+    pil_image : PIL.Image.Image
+        Source image.
+    save_path : str, optional
+        If provided, the enhanced image is written to this path.
+
+    Returns
+    -------
+    PIL.Image.Image
+        The enhanced image.
     """
-    return img
+    # --- Convert PIL → OpenCV (RGB → BGR) ------------------------------------
+    cv_img = cv2.cvtColor(np.asarray(pil_image), cv2.COLOR_RGB2BGR)
+
+    # 1) Grayscale
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+
+    # 2) Denoise with Gaussian blur
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # 3) CLAHE contrast equalisation
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    equalised = clahe.apply(blurred)
+
+    # 4) Sharpening filter
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    sharpened = cv2.filter2D(equalised, -1, kernel)
+
+    # --- Convert OpenCV → PIL (GRAY → RGB) -----------------------------------
+    pil_enhanced = Image.fromarray(cv2.cvtColor(sharpened, cv2.COLOR_GRAY2RGB))
+
+    # 5) Brightness & contrast boost
+    pil_enhanced = ImageEnhance.Brightness(pil_enhanced).enhance(1.5)
+    pil_enhanced = ImageEnhance.Contrast(pil_enhanced).enhance(2.0)
+
+    # Optional save
+    if save_path:
+        os.makedirs(
+            os.path.dirname(save_path), exist_ok=True
+        )
+        pil_enhanced.save(save_path)
+
+    return pil_enhanced
+
 
 
 # ---------------------------------------------------------------------------
@@ -187,15 +232,16 @@ def _postprocess_rooms(
 # ---------------------------------------------------------------------------
 
 def run_inference(
-    input_dir:        Path,
-    model_path:       Path,
-    encoder_name:     str          = "resnet18",
-    num_room_classes: int | None   = None,
-    image_size:       int          = 512,
-    threshold:        float        = 0.5,
-    batch_size:       int          = 4,
-    device:           torch.device | None = None,
-    palette_path:     Path | None  = None,
+    input_dir:          Path,
+    model_path:         Path,
+    encoder_name:       str          = "resnet18",
+    num_room_classes:   int | None   = None,
+    image_size:         int          = 512,
+    threshold:          float        = 0.5,
+    batch_size:         int          = 4,
+    device:             torch.device | None = None,
+    palette_path:       Path | None  = None,
+    enhance_greyscale:  bool         = False,
 ) -> None:
 
     if device is None:
@@ -242,6 +288,8 @@ def run_inference(
 
     # ── Discover input images ──────────────────────────────────────────────
     images_dir = input_dir / "images"
+    get_enhp = lambda p: p.parent.with_name("images_enhanced") / p.name # Enhance path
+    
     if not images_dir.exists():
         print(f"ERROR: {images_dir} does not exist.")
         sys.exit(1)
@@ -269,7 +317,8 @@ def run_inference(
         pil_images  = [Image.open(p).convert("RGB") for p in batch_paths]
         orig_sizes  = [img.size for img in pil_images]   # (W, H) per PIL convention
 
-        enhanced   = [enhance_colors(img) for img in pil_images]
+        enhanced   = [enhance_colors(img, get_enhp(p)) for p, img in zip(batch_paths, pil_images)] \
+                     if enhance_greyscale else pil_images
         tensors    = torch.stack([transform(img) for img in enhanced]).to(device)
 
         with torch.no_grad():
@@ -346,6 +395,9 @@ def main() -> None:
     parser.add_argument("--threshold",   type=float, default=None,
                         help="Sigmoid threshold for wall prediction (default: 0.5).")
     parser.add_argument("--batch_size",  type=int, default=4)
+    parser.add_argument("--enhance_greyscale", type=lambda x: x.lower() == "true",
+                        default=False, metavar="true|false",
+                        help="Apply greyscale enhancement before inference (default: false).")
     parser.add_argument("--device",      default=None,
                         help="cpu / cuda / mps (default: auto-detect).")
 
@@ -366,15 +418,16 @@ def main() -> None:
         palette_path = ROOT / cfg_params["palette_dir"] / f"{cfg_params['dataset_version']}_palette.json"
 
     run_inference(
-        input_dir        = Path(args.input_dir),
-        model_path       = Path(args.model_path),
-        encoder_name     = encoder_name,
-        num_room_classes = args.num_classes,
-        image_size       = image_size,
-        threshold        = threshold,
-        batch_size       = args.batch_size,
-        device           = _auto_device(args.device),
-        palette_path     = palette_path,
+        input_dir          = Path(args.input_dir),
+        model_path         = Path(args.model_path),
+        encoder_name       = encoder_name,
+        num_room_classes   = args.num_classes,
+        image_size         = image_size,
+        threshold          = threshold,
+        batch_size         = args.batch_size,
+        device             = _auto_device(args.device),
+        palette_path       = palette_path,
+        enhance_greyscale  = args.enhance_greyscale,
     )
 
 

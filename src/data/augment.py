@@ -1,35 +1,38 @@
 """
-Augmentation pipeline for floor-plan datasets.
+Apply an ordered pipeline of augmentation strategies to floor-plan images.
 
-Reads images directly from a raw dataset directory, applies spatial and/or
-photometric transforms, and writes augmented copies to a new directory under
-data/raw/. All three mask channels (walls, colors, footprints) are transformed
-jointly with the image to maintain alignment.
+Strategies are listed in order via --strategies; the combined name drives the
+output directory and file prefix:
+
+  --strategies greyscale
+      output dir : data/augmented/{source}/greyscale/
+      file prefix: greyscale_pseudo_00000.png
+
+  --strategies greyscale geometric
+      output dir : data/augmented/{source}/greyscale_geometric/
+      file prefix: greyscale_geometric_pseudo_00000.png
+
+Output layout:
+  data/augmented/{source}/{combined}/images/{combined}_{orig_name}
+  data/augmented/{source}/{combined}/masks/walls/{combined}_{orig_name}
+  data/augmented/{source}/{combined}/masks/colors/{combined}_{orig_name}
+  data/augmented/{source}/{combined}/masks/footprints/{combined}_{orig_name}
+
+Color-only strategies (greyscale, photometric) leave masks unchanged.
+Spatial strategies (geometric, scale_crop, elastic) apply the same random
+transform jointly to the image and every mask to preserve alignment.
 
 Usage:
-  python src/data/augment.py --source pseudo-12k --strategy geometric
-  python src/data/augment.py --source pseudo-12k --strategy geometric+photometric --copies 2
+  python src/data/augment.py --strategies greyscale
+  python src/data/augment.py --strategies greyscale geometric
+  python src/data/augment.py --strategies geometric --source pseudo-12k --force
   python src/data/augment.py --list-strategies
-
-Output directory:
-  data/raw/<source>_aug_<strategy>/
-    images/   <prefix>_<id>.png
-    masks/
-      walls/      <prefix>_<id>.png
-      colors/     <prefix>_<id>.png
-      footprints/ <prefix>_<id>.png
-
-Strategies can be combined with '+'. Augmented files inherit the source prefix
-(pseudo_ or manual_) and are structured identically to raw downloads so that
-versioning.py can include them in a dataset version without special handling.
 """
 
 import argparse
-import logging
-import random
 import sys
-import traceback
 from pathlib import Path
+from typing import Callable
 
 import albumentations as A
 import cv2
@@ -39,21 +42,33 @@ from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = ROOT / "data" / "raw"
+AUG_DIR = ROOT / "data" / "augmented"
+
 MASK_COLS = ["walls", "colors", "footprints"]
+SOURCES   = ["pseudo-12k", "manual-1k"]
+
+# (image_rgb_np [H,W,3], masks [list of H,W,3]) -> (image_rgb_np, masks)
+StrategyFn = Callable[
+    [np.ndarray, list[np.ndarray]],
+    tuple[np.ndarray, list[np.ndarray]],
+]
 
 
 # ---------------------------------------------------------------------------
-# Strategy definitions
-# ---------------------------------------------------------------------------
-# Add new strategies here and document them in augmentation.md.
-# Each builder returns an albumentations Compose pipeline.
-# Spatial transforms are applied to image + all masks simultaneously.
-# Photometric transforms are applied to image only (masks unchanged).
+# Strategy implementations
 # ---------------------------------------------------------------------------
 
-def _geometric() -> A.Compose:
-    """Spatial transforms safe for floor-plan annotations."""
-    return A.Compose([
+def _greyscale(img: np.ndarray, masks: list[np.ndarray]) \
+        -> tuple[np.ndarray, list[np.ndarray]]:
+    """Convert image to greyscale (L -> 3-channel RGB). Masks unchanged."""
+    grey = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    return cv2.cvtColor(grey, cv2.COLOR_GRAY2RGB), masks
+
+
+def _geometric(img: np.ndarray, masks: list[np.ndarray]) \
+        -> tuple[np.ndarray, list[np.ndarray]]:
+    """Spatial flips, rotations and small affine shifts applied to image + masks."""
+    pipeline = A.Compose([
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
@@ -63,22 +78,28 @@ def _geometric() -> A.Compose:
         ),
         A.Affine(shear=(-5, 5), p=0.3),
     ])
+    result = pipeline(image=img, masks=masks)
+    return result["image"], result["masks"]
 
 
-def _photometric() -> A.Compose:
-    """Pixel-level transforms applied to image only."""
-    return A.Compose([
+def _photometric(img: np.ndarray, masks: list[np.ndarray]) \
+        -> tuple[np.ndarray, list[np.ndarray]]:
+    """Pixel-level colour/brightness changes applied to image only."""
+    pipeline = A.Compose([
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-        A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=10, p=0.4),
+        A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20,
+                             val_shift_limit=10, p=0.4),
         A.GaussNoise(std_range=(0.01, 0.05), p=0.3),
         A.GaussianBlur(blur_limit=(3, 5), p=0.2),
         A.Sharpen(alpha=(0.1, 0.3), lightness=(0.8, 1.0), p=0.2),
     ])
+    return pipeline(image=img)["image"], masks
 
 
-def _scale_crop() -> A.Compose:
-    """Random crop + resize to force handling of partial floor plans."""
-    return A.Compose([
+def _scale_crop(img: np.ndarray, masks: list[np.ndarray]) \
+        -> tuple[np.ndarray, list[np.ndarray]]:
+    """Random crop + resize to simulate partial floor plans."""
+    pipeline = A.Compose([
         A.RandomResizedCrop(
             size=(512, 512), scale=(0.5, 1.0), ratio=(0.75, 1.33),
             interpolation=cv2.INTER_LINEAR, p=0.6,
@@ -86,206 +107,235 @@ def _scale_crop() -> A.Compose:
         A.PadIfNeeded(min_height=512, min_width=512,
                       border_mode=cv2.BORDER_CONSTANT, value=255, p=1.0),
     ])
+    result = pipeline(image=img, masks=masks)
+    return result["image"], result["masks"]
 
 
-def _elastic() -> A.Compose:
-    """Non-rigid distortions for imperfect/hand-drawn floor plans."""
-    return A.Compose([
+def _elastic(img: np.ndarray, masks: list[np.ndarray]) \
+        -> tuple[np.ndarray, list[np.ndarray]]:
+    """Non-rigid distortions for hand-drawn / imperfect floor plans."""
+    pipeline = A.Compose([
         A.ElasticTransform(alpha=40, sigma=6, p=0.3),
         A.GridDistortion(num_steps=5, distort_limit=0.15, p=0.3),
         A.OpticalDistortion(distort_limit=0.1, shift_limit=0.05, p=0.2),
     ])
+    result = pipeline(image=img, masks=masks)
+    return result["image"], result["masks"]
 
 
-STRATEGIES: dict[str, callable] = {
-    "geometric":   _geometric,
-    "photometric": _photometric,
-    "scale_crop":  _scale_crop,
-    "elastic":     _elastic,
+def _quantize(img: np.ndarray, n_bins: int,
+              masks: list[np.ndarray]) -> tuple[np.ndarray, list[np.ndarray]]:
+    """
+    Snap each channel to the nearer boundary of its percentile bin.
+
+    Boundaries are computed per-channel from the image itself, so the
+    quantization adapts to each image's actual intensity distribution.
+
+    n_bins=4  -> boundaries at [0, 25, 50, 75, 100]th percentile (quartiles)
+    n_bins=10 -> boundaries at [0, 10, 20, ..., 100]th percentile (deciles)
+
+    Example (n_bins=4, channel R, boundaries=[0, 80, 150, 200, 255]):
+      pixel value 95 falls in bin [80, 150].
+      |95 - 80| = 15  <  |95 - 150| = 55  →  snapped to 80.
+    """
+    pcts = np.linspace(0, 100, n_bins + 1)   # n_bins+1 boundary values
+    out  = np.empty_like(img)
+
+    for c in range(3):
+        ch    = img[:, :, c].astype(np.float32)
+        bnd   = np.percentile(ch, pcts)         # sorted, length = n_bins+1
+        flat  = ch.ravel()
+
+        # searchsorted(side='right') gives the first index where bnd[idx] > v,
+        # so bnd[idx-1] <= v < bnd[idx] is the bin containing v.
+        idx   = np.searchsorted(bnd, flat, side="right")
+        idx   = np.clip(idx, 1, len(bnd) - 1)  # keep inside valid range
+
+        left  = bnd[idx - 1]
+        right = bnd[idx]
+        snapped = np.where(np.abs(flat - left) <= np.abs(flat - right), left, right)
+        out[:, :, c] = np.clip(snapped.reshape(ch.shape), 0, 255).astype(np.uint8)
+
+    return out, masks
+
+
+def _quantization4(img: np.ndarray, masks: list[np.ndarray]) \
+        -> tuple[np.ndarray, list[np.ndarray]]:
+    """Snap each channel to the nearest quartile boundary (5 possible values). Masks unchanged."""
+    return _quantize(img, 4, masks)
+
+
+def _quantization10(img: np.ndarray, masks: list[np.ndarray]) \
+        -> tuple[np.ndarray, list[np.ndarray]]:
+    """Snap each channel to the nearest decile boundary (11 possible values). Masks unchanged."""
+    return _quantize(img, 10, masks)
+
+
+def _bleaching(img: np.ndarray, masks: list[np.ndarray],
+               threshold: int) -> tuple[np.ndarray, list[np.ndarray]]:
+    """
+    Preserve greyscale pixels; turn all coloured pixels white.
+
+    A pixel is considered greyscale when max(R,G,B) - min(R,G,B) <= threshold
+    (i.e. its chroma is low). Greyscale pixels are averaged across channels so
+    any residual tint is removed. All other pixels become (255, 255, 255).
+
+    This keeps structural information (walls, furniture, text — all near-grey)
+    while bleaching away solid room-colour fills.
+    """
+    chroma  = img.max(axis=2).astype(np.int16) - img.min(axis=2).astype(np.int16)
+    is_grey = chroma <= threshold                                # [H, W] bool
+
+    avg = (img.astype(np.int32).sum(axis=2) // 3).astype(np.uint8)  # [H, W]
+
+    # expand to 3 channels for broadcasting
+    is_grey3 = is_grey[:, :, np.newaxis].repeat(3, axis=2)     # [H, W, 3]
+    avg3     = avg[:, :, np.newaxis].repeat(3, axis=2)          # [H, W, 3]
+
+    out = np.where(is_grey3, avg3, np.uint8(255)).astype(np.uint8)
+    return out, masks
+
+
+def _chroma15(img: np.ndarray, masks: list[np.ndarray]) \
+        -> tuple[np.ndarray, list[np.ndarray]]:
+    """Turn coloured pixels white; keep greyscale pixels (chroma <= 15) as averaged grey."""
+    return _bleaching(img, masks, threshold=15)
+
+
+STRATEGIES: dict[str, StrategyFn] = {
+    "greyscale":      _greyscale,
+    "geometric":      _geometric,
+    "photometric":    _photometric,
+    "scale_crop":     _scale_crop,
+    "elastic":        _elastic,
+    "quantization4":  _quantization4,
+    "quantization10": _quantization10,
+    "chroma15":       _chroma15,
 }
 
 
-def build_pipeline(strategy_name: str) -> A.Compose:
-    """Build a combined pipeline from '+'-separated strategy names."""
-    parts = [s.strip() for s in strategy_name.split("+")]
-    unknown = [p for p in parts if p not in STRATEGIES]
-    if unknown:
-        raise ValueError(f"Unknown strategies: {unknown}. Available: {list(STRATEGIES)}")
-    if len(parts) == 1:
-        return STRATEGIES[parts[0]]()
-    transforms = []
-    for part in parts:
-        transforms.extend(STRATEGIES[part]().transforms)
-    return A.Compose(transforms)
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+
+def apply_pipeline(
+    strategy_names: list[str],
+    img: np.ndarray,
+    masks: list[np.ndarray],
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    for name in strategy_names:
+        img, masks = STRATEGIES[name](img, masks)
+    return img, masks
 
 
 # ---------------------------------------------------------------------------
-# Prefix detection
+# Per-source processing
 # ---------------------------------------------------------------------------
 
 def _detect_prefix(images_dir: Path) -> str:
-    """Infer the file prefix (pseudo/manual) from the filenames present."""
     for candidate in ("pseudo", "manual"):
         if any(images_dir.glob(f"{candidate}_*.png")):
             return candidate
-    raise ValueError(f"Cannot detect prefix in {images_dir}. "
-                     "Expected files named pseudo_*.png or manual_*.png")
+    raise ValueError(f"Cannot detect prefix in {images_dir}")
 
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-def _setup_logging(log_file: Path) -> logging.Logger:
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    log = logging.getLogger("augment")
-    log.setLevel(logging.DEBUG)
-    log.handlers.clear()
-    fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s",
-                            datefmt="%Y-%m-%d %H:%M:%S")
-    ch = logging.StreamHandler(stream=open(sys.stdout.fileno(), "w",
-                                           encoding="utf-8", closefd=False))
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    log.addHandler(ch)
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    log.addHandler(fh)
-    return log
-
-
-# ---------------------------------------------------------------------------
-# Core augmentation
-# ---------------------------------------------------------------------------
-
-def augment_source(
-    source_name: str,
-    strategy_name: str,
-    copies_per_sample: int = 1,
-    seed: int = 42,
-    log: logging.Logger | None = None,
-) -> Path:
-    """
-    Augment all samples in a raw dataset directory.
-
-    Args:
-        source_name:       name of the source dir under data/raw/ (e.g. "pseudo-12k")
-        strategy_name:     one or more '+'-joined strategy names
-        copies_per_sample: augmented copies to generate per original image
-        seed:              random seed for reproducibility
-
-    Returns:
-        Path to the output directory.
-    """
-    if log is None:
-        log = logging.getLogger("augment")
-
-    random.seed(seed)
-    np.random.seed(seed)
-
-    src_dir = RAW_DIR / source_name
+def augment_source(source: str, strategies: list[str], force: bool = False) -> int:
+    src_dir    = RAW_DIR / source
     images_dir = src_dir / "images"
     if not images_dir.exists():
-        raise FileNotFoundError(f"Source not found: {images_dir}")
+        print(f"ERROR: {images_dir} does not exist. Run download.py first.")
+        sys.exit(1)
 
-    prefix = _detect_prefix(images_dir)
-    pipeline = build_pipeline(strategy_name)
-
-    safe_strategy = strategy_name.replace("+", "_")
-    out_name = f"{source_name}_aug_{safe_strategy}"
-    out_dir = RAW_DIR / out_name
-
-    log.info(f"Source   : {src_dir.relative_to(ROOT)}")
-    log.info(f"Strategy : {strategy_name}")
-    log.info(f"Copies   : {copies_per_sample}x")
-    log.info(f"Output   : {out_dir.relative_to(ROOT)}")
-
+    prefix   = _detect_prefix(images_dir)
+    combined = "_".join(strategies)
+    out_dir  = AUG_DIR / source / combined
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
     for col in MASK_COLS:
         (out_dir / "masks" / col).mkdir(parents=True, exist_ok=True)
 
-    src_images = sorted(images_dir.glob(f"{prefix}_*.png"))
-    log.info(f"Found {len(src_images)} source images")
+    image_paths = sorted(images_dir.glob(f"{prefix}_*.png"))
+    if not image_paths:
+        print(f"No images found in {images_dir}")
+        return 0
 
-    out_idx = 0
-    errors = 0
+    print(f"\nSource   : {source}  ({len(image_paths)} images)")
+    print(f"Pipeline : {' -> '.join(strategies)}")
+    print(f"Output   : {out_dir.relative_to(ROOT)}")
 
-    for img_path in tqdm(src_images, desc=f"Augmenting {out_name}", unit="img"):
-        try:
-            image = np.array(Image.open(img_path).convert("RGB"))
-            masks = []
-            for col in MASK_COLS:
-                m_path = src_dir / "masks" / col / img_path.name
-                masks.append(np.array(Image.open(m_path).convert("RGB")))
+    written = 0
+    for img_path in tqdm(image_paths, desc=f"{combined}/{source}", unit="img"):
+        out_name = f"{combined}_{img_path.name}"
+        img_out  = out_dir / "images" / out_name
 
-            for _ in range(copies_per_sample):
-                result = pipeline(image=image, masks=masks)
-                aug_img = result["image"]
-                aug_masks = result["masks"]
+        if not force and img_out.exists():
+            continue
 
-                out_fname = f"{prefix}_{out_idx:05d}.png"
-                Image.fromarray(aug_img).save(out_dir / "images" / out_fname)
-                for col, aug_mask in zip(MASK_COLS, aug_masks):
-                    Image.fromarray(aug_mask).save(out_dir / "masks" / col / out_fname)
+        img_np = np.array(Image.open(img_path).convert("RGB"))
+        masks: list[np.ndarray] = []
+        for col in MASK_COLS:
+            m_path = src_dir / "masks" / col / img_path.name
+            masks.append(
+                np.array(Image.open(m_path).convert("RGB"))
+                if m_path.exists() else np.zeros_like(img_np)
+            )
 
-                out_idx += 1
+        out_img_np, out_masks = apply_pipeline(strategies, img_np, masks)
 
-        except Exception as exc:
-            log.warning(f"{img_path.name} failed: {exc}")
-            log.debug(traceback.format_exc())
-            errors += 1
+        Image.fromarray(out_img_np).save(img_out)
+        for col, mask_np in zip(MASK_COLS, out_masks):
+            Image.fromarray(mask_np).save(out_dir / "masks" / col / out_name)
 
-    total = len(src_images) * copies_per_sample - errors
-    log.info(f"Saved {total} augmented samples -> {out_dir.relative_to(ROOT)}")
-    if errors:
-        log.warning(f"{errors} sample(s) had errors and were skipped")
+        written += 1
 
-    return out_dir
+    skipped = len(image_paths) - written
+    if skipped:
+        print(f"Skipped {skipped} already-existing files (--force to overwrite).")
+    print(f"Written: {written} -> {out_dir.relative_to(ROOT)}")
+    return written
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Augment a floor-plan dataset directory.")
-    parser.add_argument("--source",
-                        help="Source dataset name under data/raw/ (e.g. pseudo-12k).")
-    parser.add_argument("--strategy", default="geometric",
-                        help="Strategy or '+'-joined combination. Default: geometric")
-    parser.add_argument("--copies", type=int, default=1,
-                        help="Augmented copies per original. Default: 1")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--list-strategies", action="store_true",
-                        help="Print available strategies and exit.")
+        description="Augment floor-plan images with an ordered strategy pipeline.")
+    parser.add_argument(
+        "--strategies", nargs="+",
+        choices=list(STRATEGIES.keys()),
+        metavar="STRATEGY",
+        help=f"Ordered strategies to apply. Available: {list(STRATEGIES.keys())}",
+    )
+    parser.add_argument(
+        "--source", choices=SOURCES,
+        help="Single source to process (default: both).")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite existing output files.")
+    parser.add_argument(
+        "--list-strategies", action="store_true",
+        help="Print available strategies and exit.")
+
     args = parser.parse_args()
 
     if args.list_strategies:
         print("Available strategies:")
-        for name in STRATEGIES:
-            print(f"  {name}")
-        print("\nCombine with '+', e.g.: geometric+photometric")
+        for name, fn in STRATEGIES.items():
+            doc = fn.__doc__.strip().splitlines()[0] if fn.__doc__ else ""
+            print(f"  {name:<12}  {doc}")
         return
 
-    if not args.source:
-        parser.error("--source is required unless using --list-strategies")
+    if not args.strategies:
+        parser.error("--strategies is required unless using --list-strategies")
 
-    log_file = RAW_DIR / f"{args.source}_aug_{args.strategy.replace('+', '_')}" / "augment.log"
-    log = _setup_logging(log_file)
+    targets = [args.source] if args.source else SOURCES
+    total = 0
+    for source in targets:
+        total += augment_source(source, args.strategies, force=args.force)
 
-    try:
-        augment_source(args.source, args.strategy,
-                       copies_per_sample=args.copies, seed=args.seed, log=log)
-    except Exception as exc:
-        log.error(f"Augmentation failed: {exc}")
-        log.debug(traceback.format_exc())
-        sys.exit(1)
-    finally:
-        for h in log.handlers[:]:
-            h.close()
-            log.removeHandler(h)
+    print(f"\nTotal written: {total}")
+    print("Done.")
 
 
 if __name__ == "__main__":

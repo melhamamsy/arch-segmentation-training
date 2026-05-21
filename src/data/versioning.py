@@ -68,6 +68,7 @@ import mlflow
 
 ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = ROOT / "data" / "raw"
+AUG_DIR = ROOT / "data" / "augmented"
 VERSIONS_DIR = ROOT / "data" / "versions"
 MASK_COLS = ["walls", "colors", "footprints"]
 
@@ -116,22 +117,34 @@ def _get_augmentation(dir_name: str) -> str:
 
 def _collect_samples(source_name: str) -> list[dict]:
     """
-    Collect all sample records from data/raw/<source_name>/.
-    Returns list of dicts with filename, source, augmentation, image_path, masks.
+    Collect all sample records for a source.
+
+    source_name can be:
+      "pseudo-12k"           -> data/raw/pseudo-12k/
+      "pseudo-12k/greyscale" -> data/augmented/pseudo-12k/greyscale/
     """
-    src_dir = RAW_DIR / source_name
+    if "/" in source_name:
+        base, strategy = source_name.split("/", 1)
+        src_dir = AUG_DIR / base / strategy
+        augmentation = strategy
+        source_label = base
+        glob_pattern = "*.png"
+    else:
+        src_dir = RAW_DIR / source_name
+        augmentation = _get_augmentation(source_name)
+        source_label = source_name
+        prefix = _detect_prefix(src_dir / "images")
+        glob_pattern = f"{prefix}_*.png"
+
     images_dir = src_dir / "images"
     if not images_dir.exists():
         raise FileNotFoundError(
             f"Directory not found: {images_dir}\n"
-            f"Run download.py first, or run augment.py to create '{source_name}'."
+            f"Run download.py first, or run augment_greyscale.py to create '{source_name}'."
         )
 
-    prefix = _detect_prefix(images_dir)
-    augmentation = _get_augmentation(source_name)
     samples = []
-
-    for img_path in sorted(images_dir.glob(f"{prefix}_*.png")):
+    for img_path in sorted(images_dir.glob(glob_pattern)):
         fname = img_path.name
         masks = {}
         for col in MASK_COLS:
@@ -140,7 +153,7 @@ def _collect_samples(source_name: str) -> list[dict]:
                 masks[col] = m.relative_to(ROOT).as_posix()
         samples.append({
             "filename": fname,
-            "source": source_name,
+            "source": source_label,
             "augmentation": augmentation,
             "image_path": img_path.relative_to(ROOT).as_posix(),
             "masks": masks,
@@ -190,8 +203,13 @@ def _split_composition(samples: list[dict], grand_total: int) -> dict:
 
 
 def _source_meta(source_name: str, n_samples: int) -> dict:
-    src_dir = RAW_DIR / source_name
-    augmentation = _get_augmentation(source_name)
+    if "/" in source_name:
+        base, strategy = source_name.split("/", 1)
+        src_dir = AUG_DIR / base / strategy
+        augmentation = strategy
+    else:
+        src_dir = RAW_DIR / source_name
+        augmentation = _get_augmentation(source_name)
     return {
         "local_dir": src_dir.relative_to(ROOT).as_posix(),
         "augmentation": augmentation,

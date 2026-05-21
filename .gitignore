@@ -7,6 +7,7 @@
 !**/data/**/.gitkeep
 !src/data/*
 !data/versions/*
+!data/external/images/*
 
 experiments/
 !experiments/.gitkeep

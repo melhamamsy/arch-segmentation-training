@@ -129,3 +129,103 @@ class DualHeadUNet(nn.Module):
             f"decoders={counts['decoders']:,}\n"
             f")"
         )
+
+
+# ── Wall-only single-head model ────────────────────────────────────────────
+
+
+class WallOnlyUNet(nn.Module):
+    """
+    Single-head U-Net for wall detection only.
+
+    Can be initialised from scratch or loaded from a DualHeadUNet checkpoint
+    (transfer learning — only the wall branch weights are used).
+    """
+
+    def __init__(
+        self,
+        encoder_name:     str = "resnet18",
+        encoder_weights:  str | None = "imagenet",
+        decoder_channels: tuple[int, ...] = (256, 128, 64, 32, 16),
+    ):
+        super().__init__()
+        self._wall = smp.Unet(
+            encoder_name=encoder_name,
+            encoder_weights=encoder_weights,
+            in_channels=3,
+            classes=1,
+            activation=None,
+            decoder_channels=decoder_channels,
+        )
+        self.encoder_name = encoder_name
+
+    # ── Forward ────────────────────────────────────────────────────────────
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns wall_logits [B, 1, H, W]."""
+        features = self._wall.encoder(x)
+        return self._wall.segmentation_head(self._wall.decoder(features))
+
+    # ── Transfer learning ──────────────────────────────────────────────────
+
+    @classmethod
+    def from_dual_head_checkpoint(
+        cls,
+        checkpoint_path,
+        encoder_name:     str = "resnet18",
+        decoder_channels: tuple[int, ...] = (256, 128, 64, 32, 16),
+        device: str = "cpu",
+    ) -> "WallOnlyUNet":
+        """
+        Load wall-branch weights from a DualHeadUNet (v1) checkpoint.
+
+        v1 keys: _wall.encoder.*, _wall.decoder.*, _wall.segmentation_head.*, _room.*
+        v2 keys: _wall.encoder.*, _wall.decoder.*, _wall.segmentation_head.*
+        The _room.* keys are dropped silently.
+        """
+        model = cls(
+            encoder_name=encoder_name,
+            encoder_weights=None,   # weights come from checkpoint
+            decoder_channels=decoder_channels,
+        )
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        v1_state = ckpt["model_state"]
+        v2_state  = {k: v for k, v in v1_state.items() if k.startswith("_wall.")}
+        model.load_state_dict(v2_state, strict=True)
+        return model
+
+    # ── Parameter groups ───────────────────────────────────────────────────
+
+    def encoder_parameters(self):
+        return self._wall.encoder.parameters()
+
+    def decoder_parameters(self):
+        return (
+            list(self._wall.decoder.parameters())
+            + list(self._wall.segmentation_head.parameters())
+        )
+
+    def param_groups(self, encoder_lr: float, decoder_lr: float) -> list[dict]:
+        return [
+            {"params": list(self.encoder_parameters()), "lr": encoder_lr},
+            {"params": self.decoder_parameters(),       "lr": decoder_lr},
+        ]
+
+    # ── Utility ────────────────────────────────────────────────────────────
+
+    def count_parameters(self) -> dict[str, int]:
+        total   = sum(p.numel() for p in self.parameters())
+        encoder = sum(p.numel() for p in self.encoder_parameters())
+        decoder = sum(p.numel() for p in self.decoder_parameters())
+        return {"total": total, "encoder": encoder, "decoders": decoder}
+
+    def __repr__(self) -> str:
+        counts = self.count_parameters()
+        return (
+            f"WallOnlyUNet(\n"
+            f"  encoder={self.encoder_name}\n"
+            f"  params: total={counts['total']:,}  "
+            f"encoder={counts['encoder']:,}  "
+            f"decoder={counts['decoders']:,}\n"
+            f")"
+        )

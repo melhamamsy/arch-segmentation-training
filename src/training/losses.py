@@ -156,3 +156,38 @@ class MultiTaskLoss(nn.Module):
         l_room = self.room_loss(room_logits, room_targets)
         total  = self.alpha * l_wall + self.beta * l_room
         return total, l_wall, l_room
+
+
+# ---------------------------------------------------------------------------
+# LwF loss  (Learning without Forgetting — KL divergence for binary case)
+# ---------------------------------------------------------------------------
+
+class LwFLoss(nn.Module):
+    """
+    Soft-label distillation loss for binary wall segmentation.
+
+    Compares student logits against a frozen teacher's predictions using
+    temperature-scaled binary cross-entropy, which is equivalent to the
+    KL divergence between two Bernoulli distributions.
+
+    Args:
+        temperature: T > 1 softens the teacher distribution, making
+                     the student less rigidly constrained (default 2.0).
+    """
+
+    def __init__(self, temperature: float = 2.0):
+        super().__init__()
+        self.T = temperature
+
+    def forward(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            student_logits: [B, 1, H, W]  — new model (gradients flow here)
+            teacher_logits: [B, 1, H, W]  — frozen old model (detached)
+        """
+        soft_labels = torch.sigmoid(teacher_logits.detach() / self.T)
+        return F.binary_cross_entropy_with_logits(student_logits / self.T, soft_labels)

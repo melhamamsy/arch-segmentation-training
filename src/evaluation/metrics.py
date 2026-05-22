@@ -137,6 +137,19 @@ def room_per_class_iou(
 # Convenience: all metrics in one call
 # ---------------------------------------------------------------------------
 
+def compute_wall(
+    wall_logits:  torch.Tensor,
+    wall_targets: torch.Tensor,
+    threshold:    float = 0.5,
+) -> dict[str, float]:
+    """Wall-only metrics dict (no room head required)."""
+    return {
+        "wall_iou":       wall_iou(wall_logits, wall_targets, threshold),
+        "wall_f1":        wall_f1(wall_logits, wall_targets, threshold),
+        "wall_pixel_acc": wall_pixel_acc(wall_logits, wall_targets, threshold),
+    }
+
+
 def compute_all(
     wall_logits:      torch.Tensor,
     room_logits:      torch.Tensor,

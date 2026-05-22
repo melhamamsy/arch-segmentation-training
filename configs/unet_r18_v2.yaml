@@ -1,0 +1,52 @@
+# ── Experiment ──────────────────────────────────────────────────────────────
+experiment_name: unet_r18_v2          # MLflow experiment name
+dataset_version: v2                   # override at runtime: --version <name>
+
+# ── Model ───────────────────────────────────────────────────────────────────
+model:
+  version:          v2                       # v1 = dual-head, v2 = wall-only
+  encoder:          resnet18
+  decoder_channels: [256, 128, 64, 32, 16]
+  v1_checkpoint:    checkpoints/unet_r18_v1/best.pt
+
+# ── Training ────────────────────────────────────────────────────────────────
+training:
+  epochs:      30
+  batch_size:  8
+  image_size:  512
+  num_workers: 0
+
+  # Optimizer (AdamW)
+  lr:           5.0e-5     # lower LR for fine-tuning from v1 checkpoint
+  weight_decay: 1.0e-5
+
+  # Differential LR: encoder gets 10x lower LR than decoder
+  encoder_lr_scale: 0.1
+
+  # Wall loss composition  (BCE + Dice)
+  wall_bce_weight:  0.5
+  wall_dice_weight: 0.5
+
+  # Up-weight wall pixels to fight class imbalance
+  wall_pos_weight: 9.0
+
+# ── LwF (Learning without Forgetting) ───────────────────────────────────────
+# These are only active when --lwf is passed on the command line.
+lwf:
+  weight:      0.3    # LwF loss weight relative to task loss (lower = less constraint)
+  temperature: 2.0    # softens teacher distribution; higher = softer soft labels
+
+# ── LR scheduler ────────────────────────────────────────────────────────────
+scheduler:
+  name: cosine
+  T_max: 30           # should match training.epochs
+
+# ── Evaluation ──────────────────────────────────────────────────────────────
+evaluation:
+  best_metric:         val_wall_iou   # wall IoU drives best-checkpoint saving
+  wall_pred_threshold: 0.5
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  checkpoint_dir: checkpoints/unet_r18_v2
+  palette_dir:    data/versions

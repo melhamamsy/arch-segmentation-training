@@ -13,3 +13,8 @@ experiments/
 trials/
 !experiments/.gitkeep
 mlruns
+
+**/__pycache__/
+# Python cache
+**/__pycache__/
+*.py[cod]

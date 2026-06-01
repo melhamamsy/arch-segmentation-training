@@ -30,7 +30,10 @@ Usage:
 """
 
 import argparse
+import hashlib
+import math
 import os
+import random
 import sys
 from multiprocessing import Pool
 from pathlib import Path
@@ -215,6 +218,15 @@ STRATEGIES: dict[str, StrategyFn] = {
     "chroma15":       _chroma15,
 }
 
+# rand-crop strategies: name -> (crop_pct, n_crops)
+# n = floor(100 / crop_pct_int) — how many crops per original image.
+# Each crop is a random (crop_pct × H, crop_pct × W) region resized back to
+# the original resolution. Masks receive the IDENTICAL spatial crop so
+# walls / colors / footprints stay perfectly aligned with the image.
+RAND_CROP_STRATEGIES: dict[str, tuple[float, int]] = {
+    "rand80crop": (0.80, math.floor(100 / 80)),   # crop_pct=0.80, n=1
+}
+
 
 # ---------------------------------------------------------------------------
 # Pipeline
@@ -225,8 +237,11 @@ def apply_pipeline(
     img: np.ndarray,
     masks: list[np.ndarray],
 ) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Apply all regular strategies in order. rand-crop strategies are skipped
+    here and handled separately in _process_one."""
     for name in strategy_names:
-        img, masks = STRATEGIES[name](img, masks)
+        if name not in RAND_CROP_STRATEGIES:
+            img, masks = STRATEGIES[name](img, masks)
     return img, masks
 
 
@@ -235,14 +250,20 @@ def apply_pipeline(
 # ---------------------------------------------------------------------------
 
 def _process_one(args: tuple) -> int:
-    """Process a single image. Returns 1 if written, 0 if skipped or failed."""
-    img_path, src_dir, strategies, out_dir, combined, force = args
+    """
+    Process a single image through the strategy pipeline.
 
-    out_name = f"{combined}_{img_path.name}"
-    img_out  = out_dir / "images" / out_name
+    For pipelines that include a rand-crop strategy, n crops are written
+    with the crop index appended to the strategy name in the filename:
+        chroma15_rand80crop1_pseudo_00000.png
+        chroma15_rand80crop2_pseudo_00000.png  (if n > 1)
 
-    if not force and img_out.exists():
-        return 0
+    For all other pipelines, one file is written:
+        chroma15_pseudo_00000.png
+
+    Returns the number of files actually written (0 if all already existed).
+    """
+    img_path, src_dir, strategies, out_dir, combined, force, base_seed = args
 
     try:
         img_np = np.array(Image.open(img_path).convert("RGB"))
@@ -254,13 +275,57 @@ def _process_one(args: tuple) -> int:
                 if m_path.exists() else np.zeros_like(img_np)
             )
 
-        out_img_np, out_masks = apply_pipeline(strategies, img_np, masks)
+        # Apply all regular strategies (rand-crop is skipped inside apply_pipeline)
+        img_np, masks = apply_pipeline(strategies, img_np, masks)
 
-        Image.fromarray(out_img_np).save(img_out)
-        for col, mask_np in zip(MASK_COLS, out_masks):
-            Image.fromarray(mask_np).save(out_dir / "masks" / col / out_name)
+        # Check for a rand-crop strategy in the pipeline
+        rand_strat = next((s for s in strategies if s in RAND_CROP_STRATEGIES), None)
 
-        return 1
+        if rand_strat is None:
+            # ── Single output ────────────────────────────────────────────────
+            out_name = f"{combined}_{img_path.name}"
+            img_out  = out_dir / "images" / out_name
+            if not force and img_out.exists():
+                return 0
+            Image.fromarray(img_np).save(img_out)
+            for col, mask_np in zip(MASK_COLS, masks):
+                Image.fromarray(mask_np).save(out_dir / "masks" / col / out_name)
+            return 1
+
+        # ── Rand-crop: n outputs, each with a different deterministic seed ──
+        crop_pct, n = RAND_CROP_STRATEGIES[rand_strat]
+        H, W        = img_np.shape[:2]
+        crop_h      = int(H * crop_pct)
+        crop_w      = int(W * crop_pct)
+
+        # Seed per (image, crop_index): stable across runs, unique per image
+        path_hash = int(hashlib.sha256(img_path.name.encode()).hexdigest()[:8], 16)
+
+        transform = A.Compose([
+            A.RandomCrop(height=crop_h, width=crop_w, p=1.0),
+            A.Resize(height=H, width=W, interpolation=cv2.INTER_LINEAR, p=1.0),
+        ])
+
+        written = 0
+        for i in range(1, n + 1):
+            # Replace "rand80crop" with "rand80crop1", "rand80crop2", etc.
+            out_name = f"{combined.replace(rand_strat, f'{rand_strat}{i}')}_{img_path.name}"
+            img_out  = out_dir / "images" / out_name
+            if not force and img_out.exists():
+                continue
+
+            crop_seed = (base_seed + path_hash + i) & 0xFFFF_FFFF
+            np.random.seed(crop_seed)
+            random.seed(crop_seed)
+
+            result = transform(image=img_np, masks=masks)
+            Image.fromarray(result["image"]).save(img_out)
+            for col, mask_np in zip(MASK_COLS, result["masks"]):
+                Image.fromarray(mask_np).save(out_dir / "masks" / col / out_name)
+            written += 1
+
+        return written
+
     except Exception as exc:
         print(f"\nWARN  {img_path.name}: {exc}", flush=True)
         return 0
@@ -282,6 +347,7 @@ def augment_source(
     strategies: list[str],
     force: bool = False,
     workers: int | None = None,
+    seed: int = 42,
 ) -> int:
     src_dir    = RAW_DIR / source
     images_dir = src_dir / "images"
@@ -301,14 +367,19 @@ def augment_source(
         print(f"No images found in {images_dir}")
         return 0
 
+    # How many output files per input image
+    rand_strat  = next((s for s in strategies if s in RAND_CROP_STRATEGIES), None)
+    n_per_img   = RAND_CROP_STRATEGIES[rand_strat][1] if rand_strat else 1
+    total_files = len(image_paths) * n_per_img
+
     n_workers = workers or os.cpu_count() or 1
-    print(f"\nSource   : {source}  ({len(image_paths)} images)")
+    print(f"\nSource   : {source}  ({len(image_paths)} images → {total_files} output files)")
     print(f"Pipeline : {' -> '.join(strategies)}")
     print(f"Workers  : {n_workers}")
     print(f"Output   : {out_dir.relative_to(ROOT)}")
 
     tasks = [
-        (img_path, src_dir, strategies, out_dir, combined, force)
+        (img_path, src_dir, strategies, out_dir, combined, force, seed)
         for img_path in image_paths
     ]
 
@@ -322,7 +393,7 @@ def augment_source(
         ):
             written += result
 
-    skipped = len(image_paths) - written
+    skipped = total_files - written
     if skipped:
         print(f"Skipped {skipped} already-existing files (--force to overwrite).")
     print(f"Written: {written} -> {out_dir.relative_to(ROOT)}")
@@ -336,11 +407,12 @@ def augment_source(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Augment floor-plan images with an ordered strategy pipeline.")
+    all_strategies = list(STRATEGIES.keys()) + list(RAND_CROP_STRATEGIES.keys())
     parser.add_argument(
         "--strategies", nargs="+",
-        choices=list(STRATEGIES.keys()),
+        choices=all_strategies,
         metavar="STRATEGY",
-        help=f"Ordered strategies to apply. Available: {list(STRATEGIES.keys())}",
+        help=f"Ordered strategies to apply. Available: {all_strategies}",
     )
     parser.add_argument(
         "--source", choices=SOURCES,
@@ -352,6 +424,9 @@ def main() -> None:
         "--workers", type=int, default=None,
         help="Number of parallel worker processes (default: all CPU cores).")
     parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Base random seed for rand-crop strategies (default: 42).")
+    parser.add_argument(
         "--list-strategies", action="store_true",
         help="Print available strategies and exit.")
 
@@ -361,7 +436,11 @@ def main() -> None:
         print("Available strategies:")
         for name, fn in STRATEGIES.items():
             doc = fn.__doc__.strip().splitlines()[0] if fn.__doc__ else ""
-            print(f"  {name:<12}  {doc}")
+            print(f"  {name:<14}  {doc}")
+        print()
+        for name, (pct, n) in RAND_CROP_STRATEGIES.items():
+            print(f"  {name:<14}  Random crop {int(pct*100)}% of image, resize back. "
+                  f"Generates {n} crop(s) per image.")
         return
 
     if not args.strategies:
@@ -371,7 +450,8 @@ def main() -> None:
     total = 0
     for source in targets:
         total += augment_source(source, args.strategies,
-                                force=args.force, workers=args.workers)
+                                force=args.force, workers=args.workers,
+                                seed=args.seed)
 
     print(f"\nTotal written: {total}")
     print("Done.")

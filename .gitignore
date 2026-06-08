@@ -10,7 +10,9 @@
 !data/external/images/*
 
 experiments/
-trials/
+trials/*
+!trials/cubicasa5k/
+!trials/cubicasa5k/**
 !experiments/.gitkeep
 mlruns
 

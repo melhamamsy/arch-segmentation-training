@@ -253,15 +253,19 @@ def extract_walls(svg_path: str, reference_png_path: str):
     walls_arr = np.array(walls_img)
 
     # ── Alignment-check overlay (walls in red on reference) ───────────────
-    ref_arr    = np.array(ref)
-    wall_mask  = walls_arr.mean(axis=2) > 128
-    check      = ref_arr.copy().astype(np.float32)
+    check_arr = _make_check_overlay(np.array(ref), walls_arr)
+
+    return walls_arr, check_arr, crop_box
+
+
+def _make_check_overlay(base_arr, walls_arr):
+    """Overlay the wall mask (white pixels) in red on a base RGB array."""
+    wall_mask = walls_arr.mean(axis=2) > 128
+    check     = base_arr.astype(np.float32)
     check[wall_mask, 0]  = 255
     check[wall_mask, 1] *= 0.25
     check[wall_mask, 2] *= 0.25
-    check_arr  = check.astype(np.uint8)
-
-    return walls_arr, check_arr, crop_box
+    return check.astype(np.uint8)
 
 
 # ── Dry-run stats collection ──────────────────────────────────────────────────
@@ -309,7 +313,15 @@ def _print_dry_run_stats(n_scanned: int, n_skipped: int,
 # ── SVG → PIL renderer ───────────────────────────────────────────────────────
 
 def _render_svg(svg_path: str, target_w: int, target_h: int) -> Image.Image:
-    """Render an SVG to a PIL RGB Image (white background) at the given size."""
+    """
+    Render an SVG to a PIL RGB Image (white background) using the SAME
+    coordinate mapping as the wall mask: 1 SVG unit = 1 pixel, placed at the
+    SVG origin and clipped/padded to a *target_w* x *target_h* canvas.
+
+    Rendering at the viewBox's intrinsic scale (scale=1) instead of letting
+    cairosvg rescale the viewBox to the target size is what keeps the model
+    image aligned with walls_arr (matplotlib uses an identity svg->pixel map).
+    """
     if not _HAS_CAIROSVG:
         raise ImportError(
             "cairosvg is required to render model SVG images. "
@@ -318,13 +330,12 @@ def _render_svg(svg_path: str, target_w: int, target_h: int) -> Image.Image:
     from pathlib import Path as _Path
     raw  = _cairosvg.svg2png(
         url=_Path(os.path.abspath(svg_path)).as_uri(),
-        output_width=target_w,
-        output_height=target_h,
+        scale=1.0,
     )
-    rgba = Image.open(io.BytesIO(raw)).convert('RGBA')
-    bg   = Image.new('RGB', rgba.size, (255, 255, 255))
-    bg.paste(rgba, mask=rgba.split()[3])
-    return bg
+    rgba   = Image.open(io.BytesIO(raw)).convert('RGBA')
+    canvas = Image.new('RGB', (target_w, target_h), (255, 255, 255))
+    canvas.paste(rgba, (0, 0), mask=rgba.split()[3])
+    return canvas
 
 
 # ── Output directory helpers ──────────────────────────────────────────────────
@@ -369,22 +380,25 @@ def _process_sample(svg_path, img_path, out_paths, prefix, sample_id):
     shutil.copy2(svg_path, os.path.join(out_paths['model'],   fname_svg))
 
     try:
-        _render_svg(svg_path, target_w, target_h).crop(crop_box).save(
+        model_img  = _render_svg(svg_path, target_w, target_h)
+        model_check = _make_check_overlay(np.array(model_img), walls_arr)
+        model_img.crop(crop_box).save(
             os.path.join(out_paths['images'],     fname_model))
         walls_cropped.save(os.path.join(out_paths['walls'],       fname_model))
-        check_full.save(   os.path.join(out_paths['walls_check'], fname_model))
+        Image.fromarray(model_check).save(
+            os.path.join(out_paths['walls_check'], fname_model))
     except Exception:
         pass
 
 
 # ── Per-directory processing ──────────────────────────────────────────────────
 
-def process_dirname(root_dir: str, dirname: str,
+def process_dirname(input_root_dir: str, output_root_dir: str, dirname: str,
                     dry_run: bool = False, sample: str = None,
                     workers: int = None) -> None:
     prefix     = DIRS[dirname]
-    input_dir  = os.path.join(root_dir, dirname)
-    out_root   = os.path.join(root_dir, 'cubicasa5k')
+    input_dir  = os.path.join(input_root_dir, dirname)
+    out_root   = os.path.join(output_root_dir, 'cubicasa5k')
 
     if not os.path.isdir(input_dir):
         print(f"  [SKIP] input dir not found: {input_dir}")
@@ -518,15 +532,37 @@ def main():
             '(must contain model.svg). Implies --dry-run; --dirname is ignored.'
         ),
     )
+    parser.add_argument(
+        '--input-root', '-i',
+        default=None,
+        metavar='DIR',
+        help=(
+            'Root directory holding the dataset dirs (colorful/, high_quality/, ...). '
+            'Defaults to the directory where this script resides.'
+        ),
+    )
+    parser.add_argument(
+        '--output-root', '-o',
+        default=None,
+        metavar='DIR',
+        help=(
+            "Root directory under which the 'cubicasa5k/' output tree is created. "
+            "Defaults to ../../data/raw relative to this script."
+        ),
+    )
     args = parser.parse_args()
 
-    root_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir      = os.path.dirname(os.path.abspath(__file__))
+    input_root_dir  = os.path.abspath(args.input_root) if args.input_root \
+        else script_dir
+    output_root_dir = os.path.abspath(args.output_root) if args.output_root \
+        else os.path.abspath(os.path.join(script_dir, '..', '..', 'data', 'raw'))
 
     # ── Single-path dry run ───────────────────────────────────────────────────
     if args.dry_path:
         dry_path = args.dry_path
         if not os.path.isabs(dry_path):
-            dry_path = os.path.join(root_dir, dry_path)
+            dry_path = os.path.join(input_root_dir, dry_path)
         svg_path = os.path.join(dry_path, 'model.svg')
         if not os.path.exists(svg_path):
             parser.error(f"model.svg not found in: {dry_path}")
@@ -557,7 +593,8 @@ def main():
 
     for dirname in dirnames:
         print(f"\n=== {dirname} ({DIRS[dirname]}) ===")
-        process_dirname(root_dir, dirname, dry_run=args.dry_run, sample=args.sample)
+        process_dirname(input_root_dir, output_root_dir, dirname,
+                        dry_run=args.dry_run, sample=args.sample)
 
     print("\nDone.")
 

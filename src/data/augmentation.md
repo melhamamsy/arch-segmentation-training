@@ -62,6 +62,61 @@ Non-rigid distortions that simulate imperfect hand-drawn floor plans.
 
 ---
 
+### `chroma<T>`
+Bleach away room-colour fills: turn **coloured** pixels white while keeping
+near-grey structure (walls, furniture, text). Masks unchanged.
+
+`T` is the chroma threshold and is read from the strategy name at runtime —
+pass `chroma15`, `chroma25`, or any integer in `0..255`.
+
+| Step | Detail |
+|---|---|
+| Compute chroma | `max(R,G,B) − min(R,G,B)` per pixel |
+| Keep greyscale | pixels with chroma ≤ T → averaged grey (residual tint removed) |
+| Bleach colour | pixels with chroma > T → white (255,255,255) |
+
+Higher `T` keeps more (faintly-tinted) pixels as grey; lower `T` bleaches more
+aggressively. Useful for bridging the gap between coloured (pseudo) and
+greyscale/scanned (manual) plans by collapsing solid room fills.
+
+**When to use:** When room-colour fills are noise for the task and only the
+grey line-work (walls, text) matters.
+
+---
+
+### `howallow<N>`
+Turn solid walls into **hollow** walls (outline only, white inside) to match
+inference-time floor plans that draw walls as borders rather than filled blocks.
+
+`N` is the rim width in pixels and is read from the strategy name at runtime —
+pass `howallow2`, `howallow5`, `howallow12`, or any positive integer. No fixed
+registration: the border is parsed from `howallow<N>`.
+
+| Step | Detail |
+|---|---|
+| Read walls mask | `masks/walls` (white walls on black) defines the wall region |
+| Erode by N px | Square erosion = sweep inward from every wall edge, keep N px per side |
+| Blank interior | Eroded interior pixels → white (255,255,255) in the image |
+
+Sweeping from all sides and keeping a fixed N px margin from the nearest edge is
+exactly a square (L∞) erosion: a wall pixel is *interior* iff it sits more than
+N px from the nearest background pixel along any axis. Internal walls, junctions
+and closed room outlines are handled automatically (both sides of every wall are
+background in the mask). Walls thinner than 2·N px survive intact — no interior to
+blank — so thin walls and the N px rims stay solid. **Masks are unchanged**, so
+wall annotations still describe the full (solid) wall footprint.
+
+**Choosing N:** match it to wall thickness. `pseudo-12k` / `manual-1k` walls are
+~8–10px (use `howallow2`); `cubicasa5k` walls are ~14–43px (use `howallow5` or
+larger). If `N` ≥ half the wall thickness the strategy is a no-op (nothing to
+hollow).
+
+**When to use:** When training data has solid walls but inference plans have
+hollow/outlined walls. Place after any spatial strategy (e.g. `geometric howallow5`)
+so the mask used for hollowing stays aligned with the transformed image.
+
+---
+
 ## Combining Strategies
 
 Strategies are combined with `+`. The transforms from each strategy are concatenated into a single pipeline (order = left to right).

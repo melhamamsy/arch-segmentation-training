@@ -12,11 +12,19 @@ output directory and file prefix:
       output dir : data/augmented/{source}/greyscale_geometric/
       file prefix: greyscale_geometric_pseudo_00000.png
 
-Output layout:
+Output layout (one masks/ subdir per mask column the source actually has):
   data/augmented/{source}/{combined}/images/{combined}_{orig_name}
   data/augmented/{source}/{combined}/masks/walls/{combined}_{orig_name}
-  data/augmented/{source}/{combined}/masks/colors/{combined}_{orig_name}
-  data/augmented/{source}/{combined}/masks/footprints/{combined}_{orig_name}
+  data/augmented/{source}/{combined}/masks/colors/{combined}_{orig_name}       (pseudo/manual only)
+  data/augmented/{source}/{combined}/masks/footprints/{combined}_{orig_name}   (pseudo/manual only)
+
+Sources (see SOURCES) span two on-disk layouts; both are handled automatically:
+  pseudo-12k, manual-1k                 — flat, masks: walls + colors + footprints
+  cubicasa5k/{high_quality,             — nested one level, masks: walls only
+              high_quality_architectural,
+              colorful}
+The file-name prefix and the set of mask columns are detected per source, so
+cubicasa runs carry only the walls mask (no zero-filled colors/footprints).
 
 Color-only strategies (greyscale, photometric) leave masks unchanged.
 Spatial strategies (geometric, scale_crop, elastic) apply the same random
@@ -26,6 +34,7 @@ Usage:
   python src/data/augment.py --strategies greyscale
   python src/data/augment.py --strategies greyscale geometric
   python src/data/augment.py --strategies geometric --source pseudo-12k --force
+  python src/data/augment.py --strategies howallow5 --source cubicasa5k/high_quality
   python src/data/augment.py --list-strategies
 """
 
@@ -34,6 +43,7 @@ import hashlib
 import math
 import os
 import random
+import re
 import sys
 from multiprocessing import Pool
 from pathlib import Path
@@ -49,8 +59,22 @@ ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = ROOT / "data" / "raw"
 AUG_DIR = ROOT / "data" / "augmented"
 
-MASK_COLS = ["walls", "colors", "footprints"]
-SOURCES   = ["pseudo-12k", "manual-1k"]
+# All mask columns we know how to carry through the pipeline, in canonical
+# order. "walls" must stay first: howallow-style strategies read masks[0].
+# Not every source has every column — cubicasa5k only ships "walls" — so the
+# columns actually used for a given source are detected from disk per-source
+# (see _detect_mask_cols). "walls_check"/"model" under cubicasa are NOT masks.
+ALL_MASK_COLS = ["walls", "colors", "footprints"]
+
+# Sources live at data/raw/{source}/. cubicasa5k sources are nested one level
+# deeper (data/raw/cubicasa5k/{quality}/); pathlib handles the "/" on Windows.
+SOURCES = [
+    "pseudo-12k",
+    "manual-1k",
+    "cubicasa5k/high_quality",
+    "cubicasa5k/high_quality_architectural",
+    "cubicasa5k/colorful",
+]
 
 # (image_rgb_np [H,W,3], masks [list of H,W,3]) -> (image_rgb_np, masks)
 StrategyFn = Callable[
@@ -201,10 +225,87 @@ def _bleaching(img: np.ndarray, masks: list[np.ndarray],
     return out, masks
 
 
-def _chroma15(img: np.ndarray, masks: list[np.ndarray]) \
-        -> tuple[np.ndarray, list[np.ndarray]]:
-    """Turn coloured pixels white; keep greyscale pixels (chroma <= 15) as averaged grey."""
-    return _bleaching(img, masks, threshold=15)
+# Parameterized strategy: chroma<T> bleaches coloured pixels (chroma > T) white,
+# keeping greyscale pixels (chroma <= T) as averaged grey. T is read from the
+# strategy name at runtime (chroma15, chroma25, ...) — any T in 0..255 works.
+_CHROMA_RE = re.compile(r"^chroma(\d+)$")
+
+
+def _make_chroma(threshold: int) -> StrategyFn:
+    """Build a chroma strategy fn for a given chroma threshold."""
+    def _fn(img: np.ndarray, masks: list[np.ndarray]) \
+            -> tuple[np.ndarray, list[np.ndarray]]:
+        return _bleaching(img, masks, threshold=threshold)
+    return _fn
+
+
+def _resolve_chroma(name: str) -> StrategyFn | None:
+    """Return a chroma strategy fn if *name* is chroma<T> (0<=T<=255), else None."""
+    m = _CHROMA_RE.match(name)
+    if not m:
+        return None
+    threshold = int(m.group(1))
+    if threshold > 255:
+        raise ValueError(f"chroma threshold must be <= 255, got {threshold!r} in {name!r}")
+    return _make_chroma(threshold)
+
+
+def _hollow_walls(img: np.ndarray, masks: list[np.ndarray],
+                  border: int) -> tuple[np.ndarray, list[np.ndarray]]:
+    """
+    Turn solid walls into hollow walls: keep a *border*-pixel rim, white interior.
+
+    Training plans have solid (filled) walls, but many inference plans draw walls
+    as outlines only (hollow, white inside). This bridges that domain gap.
+
+    The walls mask (masks[0], white walls on black) defines the wall region. We
+    sweep inward from every wall edge and keep the first *border* pixels of wall
+    on each side, then blank the interior to white. Sweeping from all four sides
+    and keeping a fixed margin from the nearest edge is exactly a square (L-inf)
+    erosion: a wall pixel is "interior" iff it lies more than *border* pixels from
+    the nearest background pixel along any axis. Eroding the binary wall mask by
+    *border* yields that interior; those pixels are set white in the image.
+
+    Walls thinner than 2*border survive intact (erosion leaves no interior), so
+    thin walls and the rims themselves stay solid. Internal walls, junctions and
+    closed room outlines are handled automatically because both sides of every
+    wall are background in the mask. Masks are returned unchanged.
+    """
+    walls = masks[0]                                   # [H, W, 3] white-on-black
+    wall_bin = (walls.mean(axis=2) > 128).astype(np.uint8)
+
+    k = 2 * border + 1                                 # rect kernel keeps `border` px/side
+    kernel   = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+    interior = cv2.erode(wall_bin, kernel, iterations=1).astype(bool)  # [H, W]
+
+    out = img.copy()
+    out[interior] = 255                                # blank wall interior to white
+    return out, masks
+
+
+# Parameterized strategy: howallow<N> hollows walls keeping an N-pixel rim.
+# N is read from the strategy name at runtime (howallow2, howallow5, ...), so
+# any positive integer works without registering a fixed entry.
+_HOWALLOW_RE = re.compile(r"^howallow(\d+)$")
+
+
+def _make_howallow(border: int) -> StrategyFn:
+    """Build a howallow strategy fn for a given rim width (px)."""
+    def _fn(img: np.ndarray, masks: list[np.ndarray]) \
+            -> tuple[np.ndarray, list[np.ndarray]]:
+        return _hollow_walls(img, masks, border=border)
+    return _fn
+
+
+def _resolve_howallow(name: str) -> StrategyFn | None:
+    """Return a howallow strategy fn if *name* is howallow<N> (N>=1), else None."""
+    m = _HOWALLOW_RE.match(name)
+    if not m:
+        return None
+    border = int(m.group(1))
+    if border < 1:
+        raise ValueError(f"howallow border must be >= 1, got {border!r} in {name!r}")
+    return _make_howallow(border)
 
 
 STRATEGIES: dict[str, StrategyFn] = {
@@ -215,7 +316,6 @@ STRATEGIES: dict[str, StrategyFn] = {
     "elastic":        _elastic,
     "quantization4":  _quantization4,
     "quantization10": _quantization10,
-    "chroma15":       _chroma15,
 }
 
 # rand-crop strategies: name -> (crop_pct, n_crops)
@@ -240,8 +340,12 @@ def apply_pipeline(
     """Apply all regular strategies in order. rand-crop strategies are skipped
     here and handled separately in _process_one."""
     for name in strategy_names:
-        if name not in RAND_CROP_STRATEGIES:
-            img, masks = STRATEGIES[name](img, masks)
+        if name in RAND_CROP_STRATEGIES:
+            continue
+        fn = STRATEGIES.get(name) or _resolve_howallow(name) or _resolve_chroma(name)
+        if fn is None:
+            raise KeyError(f"Unknown strategy: {name!r}")
+        img, masks = fn(img, masks)
     return img, masks
 
 
@@ -263,12 +367,12 @@ def _process_one(args: tuple) -> int:
 
     Returns the number of files actually written (0 if all already existed).
     """
-    img_path, src_dir, strategies, out_dir, combined, force, base_seed = args
+    img_path, src_dir, strategies, out_dir, combined, force, base_seed, mask_cols = args
 
     try:
         img_np = np.array(Image.open(img_path).convert("RGB"))
         masks: list[np.ndarray] = []
-        for col in MASK_COLS:
+        for col in mask_cols:
             m_path = src_dir / "masks" / col / img_path.name
             masks.append(
                 np.array(Image.open(m_path).convert("RGB"))
@@ -288,7 +392,7 @@ def _process_one(args: tuple) -> int:
             if not force and img_out.exists():
                 return 0
             Image.fromarray(img_np).save(img_out)
-            for col, mask_np in zip(MASK_COLS, masks):
+            for col, mask_np in zip(mask_cols, masks):
                 Image.fromarray(mask_np).save(out_dir / "masks" / col / out_name)
             return 1
 
@@ -320,7 +424,7 @@ def _process_one(args: tuple) -> int:
 
             result = transform(image=img_np, masks=masks)
             Image.fromarray(result["image"]).save(img_out)
-            for col, mask_np in zip(MASK_COLS, result["masks"]):
+            for col, mask_np in zip(mask_cols, result["masks"]):
                 Image.fromarray(mask_np).save(out_dir / "masks" / col / out_name)
             written += 1
 
@@ -335,11 +439,31 @@ def _process_one(args: tuple) -> int:
 # Per-source processing
 # ---------------------------------------------------------------------------
 
+# File-name prefixes per source family. cubicasa images are named
+# cubicasa_{c,hq,hqa}_00000.png; the existing sources use pseudo_/manual_.
+_PREFIX_CANDIDATES = ("pseudo", "manual",
+                      "cubicasa_c", "cubicasa_hqa", "cubicasa_hq")
+
+
 def _detect_prefix(images_dir: Path) -> str:
-    for candidate in ("pseudo", "manual"):
+    # Longest-prefix-first so "cubicasa_hqa" wins over "cubicasa_hq".
+    for candidate in sorted(_PREFIX_CANDIDATES, key=len, reverse=True):
         if any(images_dir.glob(f"{candidate}_*.png")):
             return candidate
     raise ValueError(f"Cannot detect prefix in {images_dir}")
+
+
+def _detect_mask_cols(src_dir: Path) -> list[str]:
+    """Mask columns that actually exist for this source, in canonical order.
+
+    cubicasa5k ships only `walls` (plus non-mask `walls_check`/`model` dirs we
+    ignore); pseudo-12k / manual-1k ship walls + colors + footprints. Carrying
+    only the present columns avoids writing zero-filled colors/footprints masks.
+    """
+    cols = [c for c in ALL_MASK_COLS if (src_dir / "masks" / c).is_dir()]
+    if not cols:
+        raise ValueError(f"No known mask columns under {src_dir / 'masks'}")
+    return cols
 
 
 def augment_source(
@@ -355,11 +479,12 @@ def augment_source(
         print(f"ERROR: {images_dir} does not exist. Run download.py first.")
         sys.exit(1)
 
-    prefix   = _detect_prefix(images_dir)
-    combined = "_".join(strategies)
-    out_dir  = AUG_DIR / source / combined
+    prefix    = _detect_prefix(images_dir)
+    mask_cols = _detect_mask_cols(src_dir)
+    combined  = "_".join(strategies)
+    out_dir   = AUG_DIR / source / combined
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
-    for col in MASK_COLS:
+    for col in mask_cols:
         (out_dir / "masks" / col).mkdir(parents=True, exist_ok=True)
 
     image_paths = sorted(images_dir.glob(f"{prefix}_*.png"))
@@ -376,10 +501,11 @@ def augment_source(
     print(f"\nSource   : {source}  ({len(image_paths)} images → {total_files} output files)")
     print(f"Pipeline : {' -> '.join(strategies)}")
     print(f"Workers  : {n_workers}")
+    print(f"Masks    : {', '.join(mask_cols)}")
     print(f"Output   : {out_dir.relative_to(ROOT)}")
 
     tasks = [
-        (img_path, src_dir, strategies, out_dir, combined, force, seed)
+        (img_path, src_dir, strategies, out_dir, combined, force, seed, mask_cols)
         for img_path in image_paths
     ]
 
@@ -404,15 +530,30 @@ def augment_source(
 # CLI
 # ---------------------------------------------------------------------------
 
+def _valid_strategy(name: str) -> bool:
+    """True if *name* is a known strategy (fixed, rand-crop, howallow<N>, chroma<T>)."""
+    if name in STRATEGIES or name in RAND_CROP_STRATEGIES:
+        return True
+    try:
+        # malformed params (e.g. howallow0, chroma300) raise ValueError -> unknown
+        return (_resolve_howallow(name) is not None
+                or _resolve_chroma(name) is not None)
+    except ValueError:
+        return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Augment floor-plan images with an ordered strategy pipeline.")
-    all_strategies = list(STRATEGIES.keys()) + list(RAND_CROP_STRATEGIES.keys())
+    # howallow<N> and chroma<T> are parameterized, so argparse `choices` can't
+    # enumerate them — validate manually below instead.
+    fixed_strategies = list(STRATEGIES.keys()) + list(RAND_CROP_STRATEGIES.keys())
     parser.add_argument(
         "--strategies", nargs="+",
-        choices=all_strategies,
         metavar="STRATEGY",
-        help=f"Ordered strategies to apply. Available: {all_strategies}",
+        help=f"Ordered strategies to apply. Available: {fixed_strategies} "
+             f"plus howallow<N> (e.g. howallow2, howallow5) "
+             f"and chroma<T> (e.g. chroma15, chroma25).",
     )
     parser.add_argument(
         "--source", choices=SOURCES,
@@ -441,10 +582,22 @@ def main() -> None:
         for name, (pct, n) in RAND_CROP_STRATEGIES.items():
             print(f"  {name:<14}  Random crop {int(pct*100)}% of image, resize back. "
                   f"Generates {n} crop(s) per image.")
+        print()
+        print(f"  {'howallow<N>':<14}  Hollow out walls keeping an N-pixel rim, "
+              f"white interior (e.g. howallow2, howallow5).")
+        print(f"  {'chroma<T>':<14}  Bleach coloured pixels (chroma > T) white; "
+              f"keep greyscale as averaged grey (e.g. chroma15, chroma25).")
         return
 
     if not args.strategies:
         parser.error("--strategies is required unless using --list-strategies")
+
+    bad = [s for s in args.strategies if not _valid_strategy(s)]
+    if bad:
+        parser.error(
+            f"unknown strateg{'y' if len(bad) == 1 else 'ies'}: {', '.join(bad)}. "
+            f"Available: {list(STRATEGIES.keys()) + list(RAND_CROP_STRATEGIES.keys())} "
+            f"plus howallow<N> and chroma<T>.")
 
     targets = [args.source] if args.source else SOURCES
     total = 0

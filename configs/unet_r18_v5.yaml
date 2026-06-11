@@ -1,0 +1,53 @@
+# ── Experiment ──────────────────────────────────────────────────────────────
+experiment_name: unet_r18_v5          # MLflow experiment name
+dataset_version: v5                   # override at runtime: --data_version <name>
+
+# ── Model ───────────────────────────────────────────────────────────────────
+model:
+  version:          v2                       # v2 = wall-only WallOnlyUNet
+  encoder:          resnet18
+  decoder_channels: [256, 128, 64, 32, 16]
+  v1_checkpoint:    checkpoints/unet_r18_v4/best.pt   # start from v4 wall model
+
+# ── Training ────────────────────────────────────────────────────────────────
+training:
+  epochs:      30
+  batch_size:  8
+  image_size:  512
+  num_workers: 0
+
+  # Optimizer (AdamW)
+  lr:           2.0e-5     # very low LR: fine-tuning on hollow-wall CubiCasa5k
+  weight_decay: 1.0e-5
+
+  # Differential LR: encoder gets 10x lower LR than decoder
+  encoder_lr_scale: 0.1
+
+  # Wall loss composition  (BCE + Dice)
+  wall_bce_weight:  0.5
+  wall_dice_weight: 0.5
+
+  # Up-weight wall pixels to fight class imbalance
+  wall_pos_weight: 9.0
+
+# ── LwF (Learning without Forgetting) ───────────────────────────────────────
+# LwF is OFF for v5 — do NOT pass --lwf on the command line.
+# These values are inert unless --lwf is supplied.
+lwf:
+  weight:      0.3
+  temperature: 2.0
+
+# ── LR scheduler ────────────────────────────────────────────────────────────
+scheduler:
+  name: cosine
+  T_max: 30           # should match training.epochs
+
+# ── Evaluation ──────────────────────────────────────────────────────────────
+evaluation:
+  best_metric:         val_wall_iou
+  wall_pred_threshold: 0.5
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  checkpoint_dir: checkpoints/unet_r18_v5
+  palette_dir:    data/versions

@@ -36,10 +36,13 @@ v5 design
                        + chroma15_rand80crop manual-1k  (1 007)
           + ALL cubicasa5k/*/howallow3 test            (hollow walls)
 
-Focus: wall detection that generalises to hollow / outline-drawn walls. Training
-       sees mostly hollow cubicasa walls (small 5% slice) plus the synthetic
-       pseudo-12k chroma pipeline; the test set evaluates BOTH solid (v4) and
-       hollow cubicasa walls so the hollow-domain gain is measurable.
+Focus: introduce the hollow / outline-drawn wall domain on top of an already
+       strong synthetic baseline. Training is dominated by the pseudo-12k chroma
+       pipeline (100% chroma15 + 10% original + 10% chroma15_rand80crop) with a
+       small 5% slice of hollow cubicasa walls added so the model starts seeing
+       outline-drawn walls without forgetting the synthetic distribution. The
+       test set evaluates BOTH solid (v4) and hollow cubicasa walls so the
+       hollow-domain gain is measurable.
        CubiCasa5k provides only 'walls' masks (no colours/footprints), which is
        exactly what the wall-only model needs. howallow3 leaves masks unchanged,
        so wall annotations still describe the full (solid) wall footprint.

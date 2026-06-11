@@ -20,12 +20,14 @@ v5 design
         high_quality               -> hq
         colorful                   -> c
 
-  Train : 5%  cubicasa5k/*/howallow3            (sampled from the train trail)
+  Train : ALL cubicasa5k/*/howallow3           (full train trail)
+          + 5%  original cubicasa5k             (solid walls, sampled from train trail)
           + 100% chroma15 pseudo-12k            (ALL v1 train)
           + 10%  original pseudo-12k            (sampled from v1 train)
           + 10%  chroma15_rand80crop pseudo-12k (SAME 10% picks as original)
 
-  Val   : 5%  cubicasa5k/*/howallow3            (sampled from the val trail)
+  Val   : ALL cubicasa5k/*/howallow3           (full val trail)
+          + 5%  original cubicasa5k             (solid walls, sampled from val trail)
           + 100% chroma15 pseudo-12k            (ALL v1 val)
           + 10%  original pseudo-12k            (sampled from v1 val)
           + 10%  chroma15_rand80crop pseudo-12k (SAME 10% picks as original)
@@ -36,11 +38,11 @@ v5 design
                        + chroma15_rand80crop manual-1k  (1 007)
           + ALL cubicasa5k/*/howallow3 test            (hollow walls)
 
-Focus: introduce the hollow / outline-drawn wall domain on top of an already
-       strong synthetic baseline. Training is dominated by the pseudo-12k chroma
-       pipeline (100% chroma15 + 10% original + 10% chroma15_rand80crop) with a
-       small 5% slice of hollow cubicasa walls added so the model starts seeing
-       outline-drawn walls without forgetting the synthetic distribution. The
+Focus: specialise on the hollow / outline-drawn wall domain. Training is led by
+       the FULL set of hollow cubicasa walls (all howallow3 train images) with a
+       small 5% slice of original solid-wall cubicasa mixed in, plus the synthetic
+       pseudo-12k chroma pipeline (100% chroma15 + 10% original + 10%
+       chroma15_rand80crop) to avoid forgetting the synthetic distribution. The
        test set evaluates BOTH solid (v4) and hollow cubicasa walls so the
        hollow-domain gain is measurable.
        CubiCasa5k provides only 'walls' masks (no colours/footprints), which is
@@ -196,24 +198,29 @@ def create_v5(cubicasa_pct: float = 0.05, pseudo_pct: float = 0.10,
 
     rng = random.Random(seed)
 
-    # ── CubiCasa5k howallow3 splits (primary data, 5% of train/val) ───────────
-    cuba_train_full = _load_cubicasa_howallow3_split("train", log)
-    cuba_val_full   = _load_cubicasa_howallow3_split("val",   log)
-    cuba_test_hollow = _load_cubicasa_howallow3_split("test", log)   # FULL test
-    _validate_coverage(cuba_train_full, f"cubicasa5k/{HOWALLOW_PIPELINE}/train", log)
-    _validate_coverage(cuba_val_full,   f"cubicasa5k/{HOWALLOW_PIPELINE}/val",   log)
-    _validate_coverage(cuba_test_hollow, f"cubicasa5k/{HOWALLOW_PIPELINE}/test", log)
+    # ── CubiCasa5k howallow3 splits (primary data, FULL train/val/test) ───────
+    cuba_train_hollow = _load_cubicasa_howallow3_split("train", log)   # FULL
+    cuba_val_hollow   = _load_cubicasa_howallow3_split("val",   log)   # FULL
+    cuba_test_hollow  = _load_cubicasa_howallow3_split("test", log)    # FULL test
+    _validate_coverage(cuba_train_hollow, f"cubicasa5k/{HOWALLOW_PIPELINE}/train", log)
+    _validate_coverage(cuba_val_hollow,   f"cubicasa5k/{HOWALLOW_PIPELINE}/val",   log)
+    _validate_coverage(cuba_test_hollow,  f"cubicasa5k/{HOWALLOW_PIPELINE}/test",  log)
 
     def _sample_pct(pool: list[dict], pct: float) -> list[dict]:
         n = max(1, round(len(pool) * pct))
         return rng.sample(pool, n)
 
-    cuba_train = _sample_pct(cuba_train_full, cubicasa_pct)
-    cuba_val   = _sample_pct(cuba_val_full,   cubicasa_pct)
+    # ── CubiCasa5k ORIGINAL (solid walls) ─────────────────────────────────────
+    # train/val: small cubicasa_pct slice mixed in; test: FULL (same as v4)
+    cuba_train_orig_full = _load_cubicasa_split("train", log)
+    cuba_val_orig_full   = _load_cubicasa_split("val",   log)
+    cuba_test_orig       = _load_cubicasa_split("test",  log)
+    _validate_coverage(cuba_train_orig_full, "cubicasa5k/train", log)
+    _validate_coverage(cuba_val_orig_full,   "cubicasa5k/val",   log)
+    _validate_coverage(cuba_test_orig,       "cubicasa5k/test",  log)
 
-    # ── CubiCasa5k ORIGINAL test (solid walls, same as v4) ────────────────────
-    cuba_test_orig = _load_cubicasa_split("test", log)
-    _validate_coverage(cuba_test_orig, "cubicasa5k/test", log)
+    cuba_train_orig = _sample_pct(cuba_train_orig_full, cubicasa_pct)
+    cuba_val_orig   = _sample_pct(cuba_val_orig_full,   cubicasa_pct)
 
     # ── pseudo-12k slices: 100% chroma15 + shared 10% (original + crop) ───────
     def _pseudo_slice(pool: list[dict], pct: float) -> tuple[list, list, list]:
@@ -235,10 +242,12 @@ def create_v5(cubicasa_pct: float = 0.05, pseudo_pct: float = 0.10,
     _validate_coverage(crop_val,   f"{CHROMA_CROP_PIPELINE}/val", log)
 
     # ── Assemble train / val ──────────────────────────────────────────────────
-    train_samples = cuba_train + chroma_train + orig_train + crop_train
+    train_samples = (cuba_train_hollow + cuba_train_orig
+                     + chroma_train + orig_train + crop_train)
     rng.shuffle(train_samples)
 
-    val_samples = cuba_val + chroma_val + orig_val + crop_val
+    val_samples = (cuba_val_hollow + cuba_val_orig
+                   + chroma_val + orig_val + crop_val)
 
     # ── Test: v4 test (cubicasa orig + manual slices) + cubicasa howallow3 ────
     chroma_test = [_make_augmented_record(r, CHROMA_PIPELINE) for r in v1_test]
@@ -254,10 +263,12 @@ def create_v5(cubicasa_pct: float = 0.05, pseudo_pct: float = 0.10,
     n_orig_val,   n_crop_val   = len(orig_val),   len(crop_val)
     log.info(
         f"v5: train={len(train_samples)} "
-        f"({len(cuba_train)}/{len(cuba_train_full)} cubicasa howallow3 + "
+        f"({len(cuba_train_hollow)} cubicasa howallow3 + "
+        f"{len(cuba_train_orig)}/{len(cuba_train_orig_full)} cubicasa orig + "
         f"{len(chroma_train)} chroma15 + {n_orig_train} orig + {n_crop_train} crop)  "
         f"val={len(val_samples)} "
-        f"({len(cuba_val)}/{len(cuba_val_full)} cubicasa howallow3 + "
+        f"({len(cuba_val_hollow)} cubicasa howallow3 + "
+        f"{len(cuba_val_orig)}/{len(cuba_val_orig_full)} cubicasa orig + "
         f"{len(chroma_val)} chroma15 + {n_orig_val} orig + {n_crop_val} crop)  "
         f"test={len(test_samples)} "
         f"({len(cuba_test_orig)} cubicasa orig + {len(v1_test)} manual orig + "
@@ -281,7 +292,9 @@ def create_v5(cubicasa_pct: float = 0.05, pseudo_pct: float = 0.10,
         "test":  _split_composition(test_samples,  grand_total),
     }
 
-    n_cuba_hollow = len(cuba_train) + len(cuba_val) + len(cuba_test_hollow)
+    n_cuba_hollow = (len(cuba_train_hollow) + len(cuba_val_hollow)
+                     + len(cuba_test_hollow))
+    n_cuba_orig   = len(cuba_train_orig) + len(cuba_val_orig) + len(cuba_test_orig)
     n_pseudo_chroma = len(chroma_train) + len(chroma_val)
     n_pseudo_orig   = n_orig_train + n_orig_val
     n_pseudo_crop   = n_crop_train + n_crop_val
@@ -289,7 +302,7 @@ def create_v5(cubicasa_pct: float = 0.05, pseudo_pct: float = 0.10,
     source_meta = {
         "cubicasa5k": {
             "local_dir": "data/raw/cubicasa5k", "augmentation": "original",
-            "total_samples": len(cuba_test_orig),   # solid-wall, test only
+            "total_samples": n_cuba_orig,   # 5% in train/val + FULL test
             "categories": list(CATEGORY_PREFIX.keys()),
             "trail_files": "trials/cubicasa5k/{train,val,test}.txt",
         },
@@ -334,8 +347,9 @@ def create_v5(cubicasa_pct: float = 0.05, pseudo_pct: float = 0.10,
         "version_name": "v5",
         "description": (
             f"CubiCasa5k hollow-wall ({HOWALLOW_PIPELINE}) detection. "
-            f"Train/val: {cubicasa_pct*100:.0f}% cubicasa5k/{HOWALLOW_PIPELINE} "
-            f"(trail-file split) + 100% chroma15 + {pseudo_pct*100:.0f}% each of "
+            f"Train/val: ALL cubicasa5k/{HOWALLOW_PIPELINE} (trail-file split) "
+            f"+ {cubicasa_pct*100:.0f}% original cubicasa5k (solid walls) "
+            f"+ 100% chroma15 + {pseudo_pct*100:.0f}% each of "
             f"original / chroma15_rand80crop pseudo-12k (shared picks). "
             f"Test: v4 test (cubicasa5k original + original/chroma15/"
             f"chroma15_rand80crop manual-1k) + ALL cubicasa5k/{HOWALLOW_PIPELINE} test."
@@ -346,6 +360,7 @@ def create_v5(cubicasa_pct: float = 0.05, pseudo_pct: float = 0.10,
         "pseudo_pct":     pseudo_pct,
         "base_version":   "v1",
         "train_sources":  [f"cubicasa5k/{HOWALLOW_PIPELINE}",
+                           "cubicasa5k",
                            f"pseudo-12k/{CHROMA_PIPELINE}",
                            "pseudo-12k",
                            f"pseudo-12k/{CHROMA_CROP_PIPELINE}"],
@@ -382,8 +397,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Create v5 dataset version (CubiCasa5k hollow-wall detection).")
     parser.add_argument("--cubicasa-pct", type=float, default=0.05,
-                        help="Fraction of cubicasa5k/howallow3 retained per "
-                             "train/val split (default: 0.05).")
+                        help="Fraction of ORIGINAL (solid-wall) cubicasa5k mixed "
+                             "into each train/val split (default: 0.05). The "
+                             "howallow3 hollow-wall set is always used in full.")
     parser.add_argument("--pseudo-pct", type=float, default=0.10,
                         help="Fraction of v1 pseudo-12k used for the shared "
                              "original + chroma15_rand80crop slices in train/val "

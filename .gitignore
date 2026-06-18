@@ -1,9 +1,18 @@
 # Ignore virtual environments
 .venv/
 
-# Ignore all data contents
-**/data/**
-!**/data/**/
+# Ignore all data contents by default
+data/**
+
+# Re-include directory structure so Git can traverse
+!data/
+!data/external/
+!data/external/masks/
+!data/external/masks/walls/
+!data/versions/
+!src/data/
+
+# Re-include specific allowed files
 !**/data/**/.gitkeep
 !src/data/*
 !data/versions/*

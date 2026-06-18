@@ -1,0 +1,20 @@
+======================================================================
+PIXEL-INTENSITY DISTRIBUTION SHIFT  —  train vs external
+======================================================================
+train dir    : data\raw\pseudo-12k\images
+external dir : data\external\images
+sample size  : 200 x3 (train), 4 (external)
+
+FOREGROUND (ink) intensity
+  noise floor EMD (train-vs-train) :   0.70   [0.67, 0.84, 0.59]
+  shift EMD       (train-vs-ext)   :  41.05   -> 58.7× floor  SEVERE shift
+  train fg stats : {'mean': 161.7380505, 'std': 41.66146029077053, 'p05': 76.0, 'p50': 171.0, 'p95': 207.0}
+  ext   fg stats : {'mean': 120.68315613008149, 'std': 62.8418732762688, 'p05': 0.0, 'p50': 134.0, 'p95': 205.0}
+  fg fraction    : train 0.479 | ext 0.119   (ink density — proxy for stroke thickness/clutter)
+
+BACKGROUND (paper) intensity
+  noise floor EMD (train-vs-train) :   0.65   [0.78, 0.57, 0.59]
+  shift EMD       (train-vs-ext)   :   8.71   -> 13.5× floor  SEVERE shift
+  train bg stats : {'mean': 245.2916717529297, 'std': 8.759943008422852, 'p05': 245.0, 'p50': 247.0, 'p95': 248.0}
+  ext   bg stats : {'mean': 254.0, 'std': 0.0, 'p05': 254.0, 'p50': 254.0, 'p95': 254.0}
+======================================================================

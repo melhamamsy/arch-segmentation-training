@@ -8,6 +8,7 @@
 !src/data/*
 !data/versions/*
 !data/external/images/*
+!data/external/masks/walls/*
 
 experiments/
 trials/*

@@ -133,6 +133,15 @@ def _postprocess_walls(
     orig_sizes: list[tuple[int, int]],   # [(W, H), ...]
 ) -> list[Image.Image]:
     probs   = torch.sigmoid(logits.squeeze(1))   # [B, H, W]
+
+    # --- diagnostic: how many pixels sit in the "decidable" mid-range? ---
+    p = probs.detach().float().cpu()
+    frac_lt_01 = (p < 0.1).float().mean().item()
+    frac_gt_09 = (p > 0.9).float().mean().item()
+    frac_mid   = ((p >= 0.1) & (p <= 0.9)).float().mean().item()
+    print(f"[probs] min={p.min():.4f} max={p.max():.4f} mean={p.mean():.4f} "
+          f"| <0.1: {frac_lt_01:.2%}  mid: {frac_mid:.2%}  >0.9: {frac_gt_09:.2%}")
+
     results = []
     for i, (W, H) in enumerate(orig_sizes):
         prob_np  = (probs[i].cpu().numpy() * 255).astype(np.uint8)

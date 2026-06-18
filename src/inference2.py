@@ -152,7 +152,7 @@ def run_inference(
     model_path:        Path,
     encoder_name:      str   = "resnet18",
     image_size:        int   = 512,
-    threshold:         float = 0.4,
+    threshold:         float = 0.3,
     batch_size:        int   = 4,
     device:            torch.device | None = None,
     enhance_greyscale: bool  = False,
@@ -242,7 +242,7 @@ def main() -> None:
     parser.add_argument("--image_size",         type=int,   default=None,
                         help="Inference resolution (default: from config or 512).")
     parser.add_argument("--threshold",          type=float, default=None,
-                        help="Sigmoid threshold for wall prediction (default: 0.4).")
+                        help="Sigmoid threshold for wall prediction (default: 0.3).")
     parser.add_argument("--batch_size",         type=int,   default=4)
     parser.add_argument("--enhance_greyscale",
                         type=lambda x: x.lower() == "true",
@@ -256,7 +256,7 @@ def main() -> None:
     cfg_params   = _resolve_from_config(args.config)
     encoder_name = args.encoder    or cfg_params.get("encoder_name", "resnet18")
     image_size   = args.image_size or cfg_params.get("image_size",   512)
-    threshold    = args.threshold  or cfg_params.get("threshold",    0.4)
+    threshold    = args.threshold  or cfg_params.get("threshold",    0.3)
 
     run_inference(
         input_dir         = Path(args.input_dir),

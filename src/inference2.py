@@ -63,6 +63,7 @@ _IMAGENET_STD  = [0.229, 0.224, 0.225]
 # ---------------------------------------------------------------------------
 
 def enhance_colors(pil_image: Image.Image, save_path=None) -> Image.Image:
+    return pil_image
     cv_img    = cv2.cvtColor(np.asarray(pil_image), cv2.COLOR_RGB2BGR)
     gray      = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
     blurred   = cv2.GaussianBlur(gray, (5, 5), 0)

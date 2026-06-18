@@ -17,6 +17,8 @@ data/**
 !src/data/*
 !data/versions/*
 !data/external/images/*
+!data/external/
+!data/external/masks/
 !data/external/masks/walls/*
 
 experiments/

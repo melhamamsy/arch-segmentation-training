@@ -17,7 +17,7 @@ def push_model():
         raise ValueError("❌ Error: HF_TOKEN not found in .env or arguments.")
 
     login(token=args.token)
-    api = HfApi()
+    api = HfApi(token=args.token)
 
     print(f"📦 Ensuring repository '{args.repo_id}' exists...")
     api.create_repo(repo_id=args.repo_id, repo_type="model", exist_ok=True)

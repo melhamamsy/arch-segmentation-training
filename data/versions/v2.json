@@ -1,7 +1,7 @@
 {
   "version_name": "v2",
   "description": "Colour-reduced fine-tuning split (greyscale + chroma15). Train/val: greyscale + chroma15 of pseudo-12k (v1 indices) + 10% original pseudo-12k (1080 train / 120 val). Test: original + greyscale + chroma15 of manual-1k.",
-  "created_utc": "2026-05-22T04:01:33.422553+00:00",
+  "created_utc": "2026-05-22T06:14:07.028249+00:00",
   "seed": 42,
   "orig_pct": 0.1,
   "base_version": "v1",

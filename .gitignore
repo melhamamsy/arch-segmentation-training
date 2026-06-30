@@ -34,3 +34,6 @@ mlruns
 *.py[cod]
 
 .env
+
+checkpoints/*
+!checkpoints/.gitkeep
